@@ -136,8 +136,6 @@ Note the product type; it influences which persona options are offered in Step 0
 
 ---
 
-{{BRAIN_PREFLIGHT}}
-
 ## Step 0: DX Investigation (before scoring)
 
 The core principle: **gather evidence and force decisions BEFORE scoring, not during
@@ -451,9 +449,17 @@ Pattern:
 
 **Anti-skip rule:** Never condense, abbreviate, or skip any review pass (1-8) regardless of plan type (strategy, spec, code, infra). Every pass in this skill exists for a reason. "This is a strategy doc so DX passes don't apply" is always wrong — DX gaps are where adoption breaks down. If a pass genuinely has zero findings, say "No issues found" and move on — but you must evaluate it.
 
-{{ANTI_SHORTCUT_CLAUSE}}
+## Validation log archive
 
-{{LEARNINGS_SEARCH}}
+Historical validation, generated learning, review-log, review-dashboard, and plan-file-report material was moved to `references/validation-log.md` on 2026-06-03 to keep this generated SKILL.md under the Hermes size gate.
+Future dated validation notes must be appended to `references/validation-log.md`, not this SKILL.md body.
+
+Moved index:
+- Prior Learnings
+- Review Log
+- Review Readiness Dashboard
+- Plan File Review Report
+
 
 ### DX Trend Check
 
@@ -671,10 +677,11 @@ DX reviews:
 * **Map to DX First Principles above.** One sentence connecting your recommendation
   to a specific principle (e.g., "This violates 'zero friction at T0' because
   [persona] needs 3 extra config steps before their first API call").
-* **Zero findings:** if a section has zero findings, state "No issues, moving on"
-  and proceed. Otherwise, use AskUserQuestion for each gap — a gap with an
-  "obvious fix" is still a gap and still needs user approval before any change
-  lands in the plan.
+* **Escape hatch (tightened):** If a section has zero findings, state "No issues,
+  moving on" and proceed. If it has findings, use AskUserQuestion for each — a
+  gap with an "obvious fix" is still a gap and still needs user approval before
+  any change lands in the plan. Only skip AskUserQuestion when the fix is
+  genuinely trivial AND there are no meaningful DX alternatives. When in doubt, ask.
 * Assume the user hasn't looked at this window in 20 minutes. Re-ground every question.
 
 ## Required Outputs
@@ -778,22 +785,29 @@ DX IMPLEMENTATION CHECKLIST
 [ ] Community channel exists and is monitored
 ```
 
-{{TASKS_SECTION_EMIT:devex-review}}
-
 ### Unresolved Decisions
 If any AskUserQuestion goes unanswered, note here. Never silently default.
 
-{{REVIEW_DASHBOARD}}
+## Review Log
 
-{{PLAN_FILE_REVIEW_REPORT}}
+After producing the DX Scorecard above, persist the review result.
 
-{{LEARNINGS_LOG}}
+**PLAN MODE EXCEPTION — ALWAYS RUN:** This command writes review metadata to
+`~/.gstack/` (user config directory, not project files).
 
-{{GBRAIN_SAVE_RESULTS}}
+```bash
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-devex-review","timestamp":"TIMESTAMP","status":"STATUS","initial_score":N,"overall_score":N,"product_type":"TYPE","tthw_current":"TTHW_CURRENT","tthw_target":"TTHW_TARGET","mode":"MODE","persona":"PERSONA","competitive_tier":"TIER","pass_scores":{"getting_started":N,"api_design":N,"errors":N,"docs":N,"upgrade":N,"dev_env":N,"community":N,"measurement":N},"unresolved":N,"commit":"COMMIT"}'
+```
 
-{{BRAIN_WRITE_BACK}}
+Substitute values from the DX Scorecard. MODE is EXPANSION/POLISH/TRIAGE.
+PERSONA is a short label (e.g., "yc-founder", "platform-eng").
+TIER is Champion/Competitive/NeedsWork/RedFlag.
 
-{{BRAIN_CACHE_REFRESH}}
+
+
+
+
+
 
 ## Next Steps — Review Chaining
 
@@ -837,5 +851,3 @@ Outside voice| Recommended      | Recommended        | Skip
 * One sentence max per option.
 * After each pass, pause and wait for feedback before moving on.
 * Rate before and after each pass for scannability.
-
-{{EXIT_PLAN_MODE_GATE}}

@@ -126,22 +126,34 @@ Use the install type and directory detected in Step 2:
 ```bash
 cd "$INSTALL_DIR"
 STASH_OUTPUT=$(git stash 2>&1)
-git fetch origin
-git reset --hard origin/main
+GSTACK_UPGRADE_REMOTE="${GSTACK_UPGRADE_REMOTE:-}"
+if [ -z "$GSTACK_UPGRADE_REMOTE" ]; then
+  ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "")
+  case "$ORIGIN_URL" in
+    *LexClaw/gstack*) GSTACK_UPGRADE_REMOTE="origin" ;;
+    *) GSTACK_UPGRADE_REMOTE="origin" ;;
+  esac
+fi
+git fetch "$GSTACK_UPGRADE_REMOTE"
+git reset --hard "$GSTACK_UPGRADE_REMOTE/main"
 ./setup
 ```
 If `$STASH_OUTPUT` contains "Saved working directory", warn the user: "Note: local changes were stashed. Run `git stash pop` in the skill directory to restore them."
+
+**LexClaw fork patch:** Hit Network installs should set `origin` or `GSTACK_UPGRADE_REMOTE` to `https://github.com/LexClaw/gstack.git`. That fork carries the local-forever split-mirror `.tmpl` patch on `main`, so `git reset --hard "$GSTACK_UPGRADE_REMOTE/main"` reapplies it after each upstream sync instead of losing it to `garrytan/gstack`.
 
 **For vendored installs** (vendored, vendored-global):
 ```bash
 PARENT=$(dirname "$INSTALL_DIR")
 TMP_DIR=$(mktemp -d)
-git clone --depth 1 https://github.com/garrytan/gstack.git "$TMP_DIR/gstack"
+GSTACK_UPGRADE_REPO="${GSTACK_UPGRADE_REPO:-https://github.com/LexClaw/gstack.git}"
+git clone --depth 1 "$GSTACK_UPGRADE_REPO" "$TMP_DIR/gstack"
 mv "$INSTALL_DIR" "$INSTALL_DIR.bak"
 mv "$TMP_DIR/gstack" "$INSTALL_DIR"
 cd "$INSTALL_DIR" && ./setup
 rm -rf "$INSTALL_DIR.bak" "$TMP_DIR"
 ```
+For public upstream installs, set `GSTACK_UPGRADE_REPO=https://github.com/garrytan/gstack.git` before running this block. Hit Network defaults to the LexClaw fork so fork patches survive fresh vendored upgrades.
 
 ### Step 4.5: Handle local vendored copy
 

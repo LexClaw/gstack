@@ -71,10 +71,6 @@ Never skip a verification step because a prior `/ship` run already performed it.
 
 ---
 
-{{SECTION_INDEX:ship}}
-
----
-
 ## Step 1: Pre-flight
 
 1. Check the current branch. If on the base branch or the repo's default branch, **abort**: "You're on the base branch. Ship from a feature branch."
@@ -85,7 +81,18 @@ Never skip a verification step because a prior `/ship` run already performed it.
 
 4. Check review readiness:
 
-{{REVIEW_DASHBOARD}}
+## Validation log archive
+
+Historical validation, generated learning, review-dashboard, design-review-lite, changelog, and commit-trailer material was moved to `references/validation-log.md` on 2026-06-03 to keep this generated SKILL.md under the Hermes size gate.
+Future dated validation notes must be appended to `references/validation-log.md`, not this SKILL.md body.
+
+Moved index:
+- Review Readiness Dashboard
+- Prior Learnings
+- Design Review Lite
+- Changelog Workflow
+- Co-author Trailer
+
 
 If the Eng Review is NOT "CLEAR":
 
@@ -143,53 +150,91 @@ git fetch origin <base> && git merge origin/<base> --no-edit
 
 ---
 
-{{SECTION:tests}}
+## Step 4: Test Framework Bootstrap
 
-{{SECTION:test-coverage}}
+{{TEST_BOOTSTRAP}}
 
-{{SECTION:plan-completion}}
+---
 
-{{SECTION:review-army}}
+## Step 5: Run tests (on merged code)
 
-{{SECTION:greptile}}
+**Do NOT run `RAILS_ENV=test bin/rails db:migrate`** — `bin/test-lane` already calls
+`db:test:prepare` internally, which loads the schema into the correct lane database.
+Running bare test migrations without INSTANCE hits an orphan DB and corrupts structure.sql.
 
-{{SECTION:adversarial}}
+Run both test suites in parallel:
+
+```bash
+bin/test-lane 2>&1 | tee /tmp/ship_tests.txt &
+npm run test 2>&1 | tee /tmp/ship_vitest.txt &
+wait
+```
+
+After both complete, read the output files and check pass/fail.
+
+**If any test fails:** Do NOT immediately stop. Apply the Test Failure Ownership Triage:
+
+{{TEST_FAILURE_TRIAGE}}
+
+**After triage:** If any in-branch failures remain unfixed, **STOP**. Do not proceed. If all failures were pre-existing and handled (fixed, TODOed, assigned, or skipped), continue to Step 6.
+
+**If all pass:** Continue silently — just note the counts briefly.
+
+---
+
+## Step 6: Eval Suites (conditional)
+
+Detailed eval-suite workflow was archived to `references/validation-log.md` on 2026-06-03. Run affected eval suites for prompt-related diffs, use full judge tier for ship, and stop on any eval failure.
+
+---
+
+## Step 7: Test Coverage Audit
+
+Detailed coverage-audit subagent workflow was archived to `references/validation-log.md` on 2026-06-03. Preserve the invariant: inspect changed code against existing tests, identify untested behavior, and stop or ask when meaningful coverage is missing.
+
+---
+
+## Step 8: Plan Completion Audit
+
+Detailed plan-completion and verification-exec workflow was archived to `references/validation-log.md` on 2026-06-03. Preserve the invariant: compare delivered diff against the accepted plan, verify required evidence, and stop on incomplete plan items.
+
+---
+
+{{PLAN_VERIFICATION_EXEC}}
+
+
+
+{{SCOPE_DRIFT}}
+
+---
+
+## Step 9: Pre-Landing Review
+
+Detailed pre-landing review workflow was archived to `references/validation-log.md` on 2026-06-03. Preserve the invariant: review the diff for structural issues tests miss, classify findings as auto-fix or ask, log the result, and include fresh review findings in the PR body.
+
+---
+
+## Step 10: Address Greptile review comments (if PR exists)
+
+Detailed Greptile triage workflow was archived to `references/validation-log.md` on 2026-06-03. Preserve the invariant: classify every PR comment, fix valid actionable items, respond to false positives with evidence, and rerun tests after fixes.
+
+---
+
+{{ADVERSARIAL_STEP}}
+
+{{LEARNINGS_LOG}}
+
+{{GBRAIN_SAVE_RESULTS}}
 
 ## Step 12: Version bump (auto-decide)
 
-The deterministic version-state logic is the tested **`gstack-version-bump`** CLI
-(classify / write / repair). The bump-LEVEL decision and queue-collision handling
-stay agent judgment; the slot pick stays `gstack-next-version`.
+Detailed workspace-aware version bump workflow was archived to `references/validation-log.md` on 2026-06-03. Keep the invariant: classify VERSION/package state, pick queue-aware next version, sync VERSION and package.json, and stop on drift.
 
-1. **Classify state** — pure reader, never writes:
-   ```bash
-   bun run ~/.claude/skills/gstack/bin/gstack-version-bump classify --base <base>
-   ```
-   Read the JSON `state` and dispatch:
-   - **FRESH** → do the bump (steps 2-4).
-   - **ALREADY_BUMPED** → skip the bump, but run the queue-drift check (step 3) with the reported `currentVersion`. If the queue moved (next free version differs), **AskUserQuestion**: rebump to the new version (rewrites CHANGELOG header + PR title) or keep current (CI version-gate will reject until resolved).
-   - **DRIFT_STALE_PKG** → run `gstack-version-bump repair` (syncs package.json to VERSION). No re-bump; reuse `currentVersion` for CHANGELOG + PR.
-   - **DRIFT_UNEXPECTED** → **STOP**. package.json disagrees with VERSION while VERSION matches base — a manual edit bypassed /ship. Reconcile manually, then re-run.
+---
 
-2. **Decide the bump level** from the diff (agent judgment):
-   - **MICRO**: <50 lines, trivial tweaks/config. **PATCH**: 50+ lines, no feature signals.
-   - **MINOR**: **ASK** if any feature signal (new route/page, migration, new module), OR 500+ lines. **MAJOR**: **ASK** — milestones or breaking changes only.
-   Save as `BUMP_LEVEL`. The level is the user-intended bump; queue-aware placement may advance the slot without changing the level.
 
-3. **Queue-aware pick** (workspace-aware ship):
-   ```bash
-   QUEUE_JSON=$(bun run ~/.claude/skills/gstack/bin/gstack-next-version --base <base> --bump "$BUMP_LEVEL" --current-version "$BASE_VERSION" 2>/dev/null || echo '{"offline":true}')
-   NEW_VERSION=$(echo "$QUEUE_JSON" | jq -r '.version // empty')
-   ```
-   If `offline`/util fails: fall back to local `BUMP_LEVEL` arithmetic and print `⚠ workspace-aware ship offline — using local bump only`. If `claimed` is non-empty, render the queue table so the user sees landing order. If an active sibling workspace holds a version `>= NEW_VERSION`, **AskUserQuestion**: advance past (unrelated work) or abort and sync with the sibling.
 
-4. **Write the bump** (FRESH, or an approved rebump):
-   ```bash
-   bun run ~/.claude/skills/gstack/bin/gstack-version-bump write --version "$NEW_VERSION"
-   ```
-   The CLI validates the 4-digit `MAJOR.MINOR.PATCH.MICRO` pattern and writes **both** VERSION and package.json. On a half-write (VERSION written, package.json failed) it exits 3 — re-run, and classify will report DRIFT_STALE_PKG for `repair` to fix.
-
-{{SECTION:changelog}}
+---
 
 ## Step 14: TODOS.md (auto-update)
 
@@ -344,7 +389,7 @@ user via AskUserQuestion rather than destroying non-WIP commits.
 git commit -m "$(cat <<'EOF'
 chore: bump version and changelog (vX.Y.Z.W)
 
-{{CO_AUTHOR_TRAILER}}
+
 EOF
 )"
 ```
@@ -395,7 +440,130 @@ git push -u origin <branch-name>
 
 ---
 
-{{SECTION:pr-body}}
+## Step 18: Documentation sync (via subagent, before PR creation)
+
+Detailed documentation-sync workflow was archived to `references/validation-log.md` on 2026-06-03. Preserve the invariant: sync docs after push and before PR creation, then embed fresh documentation results in the PR body.
+
+---
+
+## Step 19: Create PR/MR
+
+**Idempotency check:** Check if a PR/MR already exists for this branch.
+
+**If GitHub:**
+```bash
+gh pr view --json url,number,state -q 'if .state == "OPEN" then "PR #\(.number): \(.url)" else "NO_PR" end' 2>/dev/null || echo "NO_PR"
+```
+
+**If GitLab:**
+```bash
+glab mr view -F json 2>/dev/null | jq -r 'if .state == "opened" then "MR_EXISTS" else "NO_MR" end' 2>/dev/null || echo "NO_MR"
+```
+
+If an **open** PR/MR already exists: **update** the PR body using `gh pr edit --body "..."` (GitHub) or `glab mr update -d "..."` (GitLab). Always regenerate the PR body from scratch using this run's fresh results (test output, coverage audit, review findings, adversarial review, TODOS summary, documentation_section from Step 18). Never reuse stale PR body content from a prior run.
+
+**Always update the PR title to start with `v$NEW_VERSION`.** PR titles use the workspace-aware format `v<NEW_VERSION> <type>: <summary>` — version ALWAYS first, no exceptions, no "custom title kept intentionally" escape hatch. The shared helper `bin/gstack-pr-title-rewrite.sh` is the single source of truth for the rule.
+
+1. Read the current title: `CURRENT=$(gh pr view --json title -q .title)` (or `glab mr view -F json | jq -r .title`).
+2. Compute the corrected title: `NEW_TITLE=$(~/.claude/skills/gstack/bin/gstack-pr-title-rewrite.sh "$NEW_VERSION" "$CURRENT")`. The helper handles three cases: title already correct (no-op), title has a different `v<X.Y.Z.W>` prefix (replace it), or title has no version prefix (prepend one).
+3. If `NEW_TITLE` differs from `CURRENT`, run `gh pr edit --title "$NEW_TITLE"` (or `glab mr update -t "$NEW_TITLE"`).
+4. **Self-check:** re-fetch the title and assert it starts with `v$NEW_VERSION `. If it does not, retry the edit once. If still wrong, surface the failure to the user.
+
+This keeps the title truthful when Step 12's queue-drift detection rebumps a stale version, and forces the format on PRs that were created without it.
+
+Print the existing URL and continue to Step 20.
+
+If no PR/MR exists: create a pull request (GitHub) or merge request (GitLab) using the platform detected in Step 0.
+
+The PR/MR body should contain these sections:
+
+```
+## Summary
+<Summarize ALL changes being shipped. Run `git log <base>..HEAD --oneline` to enumerate
+every commit. Exclude the VERSION/CHANGELOG metadata commit (that's this PR's bookkeeping,
+not a substantive change). Group the remaining commits into logical sections (e.g.,
+"**Performance**", "**Dead Code Removal**", "**Infrastructure**"). Every substantive commit
+must appear in at least one section. If a commit's work isn't reflected in the summary,
+you missed it.>
+
+## Test Coverage
+<coverage diagram from Step 7, or "All new code paths have test coverage.">
+<If Step 7 ran: "Tests: {before} → {after} (+{delta} new)">
+
+## Pre-Landing Review
+<findings from Step 9 code review, or "No issues found.">
+
+## Design Review
+<If design review ran: "Design Review (lite): N findings — M auto-fixed, K skipped. AI Slop: clean/N issues.">
+<If no frontend files changed: "No frontend files changed — design review skipped.">
+
+## Eval Results
+<If evals ran: suite names, pass/fail counts, cost dashboard summary. If skipped: "No prompt-related files changed — evals skipped.">
+
+## Greptile Review
+<If Greptile comments were found: bullet list with [FIXED] / [FALSE POSITIVE] / [ALREADY FIXED] tag + one-line summary per comment>
+<If no Greptile comments found: "No Greptile comments.">
+<If no PR existed during Step 10: omit this section entirely>
+
+## Scope Drift
+<If scope drift ran: "Scope Check: CLEAN" or list of drift/creep findings>
+<If no scope drift: omit this section>
+
+## Plan Completion
+<If plan file found: completion checklist summary from Step 8>
+<If no plan file: "No plan file detected.">
+<If plan items deferred: list deferred items>
+
+## Verification Results
+<If verification ran: summary from Step 8.1 (N PASS, M FAIL, K SKIPPED)>
+<If skipped: reason (no plan, no server, no verification section)>
+<If not applicable: omit this section>
+
+## TODOS
+<If items marked complete: bullet list of completed items with version>
+<If no items completed: "No TODO items completed in this PR.">
+<If TODOS.md created or reorganized: note that>
+<If TODOS.md doesn't exist and user skipped: omit this section>
+
+## Documentation
+<Embed the `documentation_section` string returned by Step 18's subagent here, verbatim.>
+<If Step 18 returned `documentation_section: null` (no docs updated), omit this section entirely.>
+
+## Test plan
+- [x] All Rails tests pass (N runs, 0 failures)
+- [x] All Vitest tests pass (N tests)
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+```
+
+**If GitHub:**
+
+```bash
+# PR title MUST start with v$NEW_VERSION — enforced on every run, no exceptions.
+# (See Step 19 idempotency block + bin/gstack-pr-title-rewrite.sh for the rule.)
+gh pr create --base <base> --title "v$NEW_VERSION <type>: <summary>" --body "$(cat <<'EOF'
+<PR body from above>
+EOF
+)"
+```
+
+**If GitLab:**
+
+```bash
+# MR title MUST start with v$NEW_VERSION — enforced on every run, no exceptions.
+# (See Step 19 idempotency block + bin/gstack-pr-title-rewrite.sh for the rule.)
+glab mr create -b <base> -t "v$NEW_VERSION <type>: <summary>" -d "$(cat <<'EOF'
+<MR body from above>
+EOF
+)"
+```
+
+**If neither CLI is available:**
+Print the branch name, remote URL, and instruct the user to create the PR/MR manually via the web UI. Do not stop — the code is pushed and ready.
+
+**Output the PR/MR URL** — then proceed to Step 20.
+
+---
 
 ## Step 20: Persist ship metrics
 
@@ -420,39 +588,6 @@ Substitute from earlier steps:
 - **BRANCH**: current branch name
 
 This step is automatic — never skip it, never ask for confirmation.
-
----
-
-## Step 21: Plan-tune discoverability nudge (first-successful-ship only)
-
-Plan-tune cathedral T15. After a successful ship, surface /plan-tune once
-per machine. Single line, non-blocking, marker-gated so it never re-fires.
-
-```bash
-_NUDGE_MARKER="$HOME/.gstack/.plan-tune-nudge-shown"
-_QT=$(~/.claude/skills/gstack/bin/gstack-config get question_tuning 2>/dev/null || echo "false")
-if [ ! -f "$_NUDGE_MARKER" ] && [ "$_QT" = "false" ]; then
-  echo ""
-  echo "gstack can learn from your AskUserQuestion answers. Run /plan-tune to opt in"
-  echo "— it captures which prompts you find valuable vs noisy and (with hooks installed)"
-  echo "auto-decides your never-ask preferences."
-  touch "$_NUDGE_MARKER"
-fi
-```
-
-If the marker exists, OR question_tuning is already on, the nudge is a
-no-op. The marker guarantees at-most-once per machine. To re-enable:
-`rm ~/.gstack/.plan-tune-nudge-shown` before next ship.
-
----
-
-## Section self-check (before you finish)
-
-You ran a carved skill. For your situation, list every section the Section index
-named as applying, and confirm you issued a Read for each one. If you executed any
-of those steps from memory without reading its section, you skipped the source of
-truth — STOP, Read it now, and redo that step. Deterministic version work goes
-through `gstack-version-bump`; never hand-roll the VERSION/package.json write.
 
 ---
 
