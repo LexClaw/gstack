@@ -1006,42 +1006,6 @@ Note the product type; it influences which persona options are offered in Step 0
 
 ---
 
-## Brain Context (preflight)
-
-Before asking any clarifying questions, load the brain's structured context
-for this project. The cache layer handles staleness, refresh, and stale-but-
-usable fallback automatically. Skip questions whose answers are already
-present in the loaded context; ground recommendations in what the brain
-already knows about the user, the product, the goals, and recent decisions.
-
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" 2>/dev/null || true
-{
-  printf '## Brain Context\n\n'
-  printf '\n### %s\n\n' "product"
-  ~/.claude/skills/gstack/bin/gstack-brain-cache get product --project "$SLUG" 2>/dev/null || printf '_(no product digest available yet)_\n'
-  printf '\n### %s\n\n' "developer-persona"
-  ~/.claude/skills/gstack/bin/gstack-brain-cache get developer-persona --project "$SLUG" 2>/dev/null || printf '_(no developer-persona digest available yet)_\n'
-  printf '\n### %s\n\n' "recent-decisions"
-  ~/.claude/skills/gstack/bin/gstack-brain-cache get recent-decisions --project "$SLUG" 2>/dev/null || printf '_(no recent-decisions digest available yet)_\n'
-  printf '\n### %s\n\n' "competitive-intel"
-  ~/.claude/skills/gstack/bin/gstack-brain-cache get competitive-intel --project "$SLUG" 2>/dev/null || printf '_(no competitive-intel digest available yet)_\n'
-} > /tmp/.gstack-brain-context-$$.md 2>/dev/null
-[ -s /tmp/.gstack-brain-context-$$.md ] && cat /tmp/.gstack-brain-context-$$.md
-rm -f /tmp/.gstack-brain-context-$$.md 2>/dev/null || true
-```
-
-**How to use this context:**
-- If `product` digest names the value prop, target user, or stage — don't re-ask.
-- If `goals` digest lists active goals — frame recommendations against them.
-- If `recent-decisions` digest names a prior scope/architecture choice — flag if this plan contradicts.
-- If `user-profile` digest carries calibration pattern statements ("tends to over-engineer security") — surface them when relevant.
-- If a digest is `(no X digest available yet)`, treat that section as cold; ask the user.
-
-**Privacy:** Salience digest is filtered by allowlist (D9 default: `projects/`,
-`gstack/`, `concepts/` only). Personal/family/therapy content never leaks here.
-
-
 ## Step 0: DX Investigation (before scoring)
 
 The core principle: **gather evidence and force decisions BEFORE scoring, not during
@@ -1355,45 +1319,17 @@ Pattern:
 
 **Anti-skip rule:** Never condense, abbreviate, or skip any review pass (1-8) regardless of plan type (strategy, spec, code, infra). Every pass in this skill exists for a reason. "This is a strategy doc so DX passes don't apply" is always wrong — DX gaps are where adoption breaks down. If a pass genuinely has zero findings, say "No issues found" and move on — but you must evaluate it.
 
-**Anti-shortcut clause:** The plan file is the OUTPUT of the interactive review, not a substitute for it. Writing every finding into one plan write and calling ExitPlanMode without firing AskUserQuestion is the precise failure mode of the May 2026 transcript bug — the model explored, found issues, and dumped them into a deliverable rather than walking the user through them. If you have ANY non-trivial finding in any review section, the path from finding to ExitPlanMode goes THROUGH AskUserQuestion. Zero findings in every section is the only path to ExitPlanMode that bypasses AskUserQuestion. If you find yourself wanting to write a plan with findings before asking, stop and call AskUserQuestion now — that's the bug, recognize it.
+## Validation log archive
 
-## Prior Learnings
+Historical validation, generated learning, review-log, review-dashboard, and plan-file-report material was moved to `references/validation-log.md` on 2026-06-03 to keep this generated SKILL.md under the Hermes size gate.
+Future dated validation notes must be appended to `references/validation-log.md`, not this SKILL.md body.
 
-Search for relevant learnings from previous sessions:
+Moved index:
+- Prior Learnings
+- Review Log
+- Review Readiness Dashboard
+- Plan File Review Report
 
-```bash
-_CROSS_PROJ=$(~/.claude/skills/gstack/bin/gstack-config get cross_project_learnings 2>/dev/null || echo "unset")
-echo "CROSS_PROJECT: $_CROSS_PROJ"
-if [ "$_CROSS_PROJ" = "true" ]; then
-  ~/.claude/skills/gstack/bin/gstack-learnings-search --limit 10 --cross-project 2>/dev/null || true
-else
-  ~/.claude/skills/gstack/bin/gstack-learnings-search --limit 10 2>/dev/null || true
-fi
-```
-
-If `CROSS_PROJECT` is `unset` (first time): Use AskUserQuestion:
-
-> gstack can search learnings from your other projects on this machine to find
-> patterns that might apply here. This stays local (no data leaves your machine).
-> Recommended for solo developers. Skip if you work on multiple client codebases
-> where cross-contamination would be a concern.
-
-Options:
-- A) Enable cross-project learnings (recommended)
-- B) Keep learnings project-scoped only
-
-If A: run `~/.claude/skills/gstack/bin/gstack-config set cross_project_learnings true`
-If B: run `~/.claude/skills/gstack/bin/gstack-config set cross_project_learnings false`
-
-Then re-run the search with the appropriate flag.
-
-If learnings are found, incorporate them into your analysis. When a review finding
-matches a past learning, display:
-
-**"Prior learning applied: [key] (confidence N/10, from [date])"**
-
-This makes the compounding visible. The user should see that gstack is getting
-smarter on their codebase over time.
 
 ### DX Trend Check
 
@@ -1745,10 +1681,11 @@ DX reviews:
 * **Map to DX First Principles above.** One sentence connecting your recommendation
   to a specific principle (e.g., "This violates 'zero friction at T0' because
   [persona] needs 3 extra config steps before their first API call").
-* **Zero findings:** if a section has zero findings, state "No issues, moving on"
-  and proceed. Otherwise, use AskUserQuestion for each gap — a gap with an
-  "obvious fix" is still a gap and still needs user approval before any change
-  lands in the plan.
+* **Escape hatch (tightened):** If a section has zero findings, state "No issues,
+  moving on" and proceed. If it has findings, use AskUserQuestion for each — a
+  gap with an "obvious fix" is still a gap and still needs user approval before
+  any change lands in the plan. Only skip AskUserQuestion when the fix is
+  genuinely trivial AND there are no meaningful DX alternatives. When in doubt, ask.
 * Assume the user hasn't looked at this window in 20 minutes. Re-ground every question.
 
 ## Required Outputs
@@ -1852,294 +1789,28 @@ DX IMPLEMENTATION CHECKLIST
 [ ] Community channel exists and is monitored
 ```
 
-## Implementation Tasks
-
-Before closing this review, synthesize the findings above into a flat list of
-build-actionable tasks. Each task derives from a specific finding — no padding.
-Emit the markdown section AND write a JSONL artifact that `/autoplan` can
-aggregate across phases.
-
-### Markdown section (always emit)
-
-```markdown
-## Implementation Tasks
-Synthesized from this review's findings. Each task derives from a specific
-finding above. Run with Claude Code or Codex; checkbox as you ship.
-
-- [ ] **T1 (P1, human: ~2h / CC: ~15min)** — <component> — <imperative title>
-  - Surfaced by: <section name> — <specific finding text or line reference>
-  - Files: <paths to touch>
-  - Verify: <test command or manual check>
-- [ ] **T2 (P2, human: ~30min / CC: ~5min)** — ...
-```
-
-Rules:
-- P1 blocks ship; P2 should land same branch; P3 is a follow-up TODO.
-- If a finding produced no actionable task, do not invent one.
-- If a section had zero findings, emit `_No new tasks from <section>._`
-- Effort uses the AI-compression table from CLAUDE.md.
-
-### JSONL artifact (always write, even if zero tasks)
-
-`/autoplan` reads this file to aggregate across phases. Build each line with
-`jq -nc` so titles and source findings containing quotes, newlines, or
-backslashes serialize cleanly — never use hand-rolled `echo` / `printf`.
-
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-TASKS_DIR="${HOME}/.gstack/projects/${SLUG:-unknown}"
-mkdir -p "$TASKS_DIR"
-TASKS_FILE="$TASKS_DIR/tasks-devex-review-$(date +%Y%m%d-%H%M%S).jsonl"
-COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)
-BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-
-# Repeat ONE jq invocation per task identified during this review.
-# Substitute the placeholders inline with shell variables you set per task:
-#   TASK_ID (T1, T2, ...), PRIORITY (P1/P2/P3), COMPONENT, TITLE,
-#   SOURCE_FINDING, EFFORT_HUMAN, EFFORT_CC, FILES_JSON (a JSON array literal
-#   like '["browse/src/sanitize.ts","browse/src/server.ts"]').
-jq -nc \
-  --arg phase 'devex-review' \
-  --arg run_id "$RUN_ID" \
-  --arg branch "$BRANCH" \
-  --arg commit "$COMMIT" \
-  --arg id "$TASK_ID" \
-  --arg priority "$PRIORITY" \
-  --arg component "$COMPONENT" \
-  --arg effort_human "$EFFORT_HUMAN" \
-  --arg effort_cc "$EFFORT_CC" \
-  --arg title "$TITLE" \
-  --arg source_finding "$SOURCE_FINDING" \
-  --argjson files "$FILES_JSON" \
-  '{phase:$phase, run_id:$run_id, branch:$branch, commit:$commit, id:$id, priority:$priority, component:$component, files:$files, effort_human:$effort_human, effort_cc:$effort_cc, title:$title, source_finding:$source_finding}' \
-  >> "$TASKS_FILE"
-```
-
-If `jq` is not installed, fall back to skipping the JSONL write and warn
-the user to install jq for autoplan aggregation. Never hand-roll JSONL.
-
-If zero tasks were identified in this review, still touch the JSONL file
-(`: > "$TASKS_FILE"`) so the aggregator sees that the phase produced output
-this run (an empty file means "ran, no findings" — distinct from "didn't run").
-
-
 ### Unresolved Decisions
 If any AskUserQuestion goes unanswered, note here. Never silently default.
 
-## Review Readiness Dashboard
+## Review Log
 
-After completing the review, read the review log and config to display the dashboard.
+After producing the DX Scorecard above, persist the review result.
 
-```bash
-~/.claude/skills/gstack/bin/gstack-review-read
-```
-
-Parse the output. Find the most recent entry for each skill (plan-ceo-review, plan-eng-review, review, plan-design-review, design-review-lite, adversarial-review, codex-review, codex-plan-review). Ignore entries with timestamps older than 7 days. For the Eng Review row, show whichever is more recent between `review` (diff-scoped pre-landing review) and `plan-eng-review` (plan-stage architecture review). Append "(DIFF)" or "(PLAN)" to the status to distinguish. For the Adversarial row, show whichever is more recent between `adversarial-review` (new auto-scaled) and `codex-review` (legacy). For Design Review, show whichever is more recent between `plan-design-review` (full visual audit) and `design-review-lite` (code-level check). Append "(FULL)" or "(LITE)" to the status to distinguish. For the Outside Voice row, show the most recent `codex-plan-review` entry — this captures outside voices from both /plan-ceo-review and /plan-eng-review.
-
-**Source attribution:** If the most recent entry for a skill has a \`"via"\` field, append it to the status label in parentheses. Examples: `plan-eng-review` with `via:"autoplan"` shows as "CLEAR (PLAN via /autoplan)". `review` with `via:"ship"` shows as "CLEAR (DIFF via /ship)". Entries without a `via` field show as "CLEAR (PLAN)" or "CLEAR (DIFF)" as before.
-
-Note: `autoplan-voices` and `design-outside-voices` entries are audit-trail-only (forensic data for cross-model consensus analysis). They do not appear in the dashboard and are not checked by any consumer.
-
-Display:
-
-```
-+====================================================================+
-|                    REVIEW READINESS DASHBOARD                       |
-+====================================================================+
-| Review          | Runs | Last Run            | Status    | Required |
-|-----------------|------|---------------------|-----------|----------|
-| Eng Review      |  1   | 2026-03-16 15:00    | CLEAR     | YES      |
-| CEO Review      |  0   | —                   | —         | no       |
-| Design Review   |  0   | —                   | —         | no       |
-| Adversarial     |  0   | —                   | —         | no       |
-| Outside Voice   |  0   | —                   | —         | no       |
-+--------------------------------------------------------------------+
-| VERDICT: CLEARED — Eng Review passed                                |
-+====================================================================+
-```
-
-**Review tiers:**
-- **Eng Review (required by default):** The only review that gates shipping. Covers architecture, code quality, tests, performance. Can be disabled globally with \`gstack-config set skip_eng_review true\` (the "don't bother me" setting).
-- **CEO Review (optional):** Use your judgment. Recommend it for big product/business changes, new user-facing features, or scope decisions. Skip for bug fixes, refactors, infra, and cleanup.
-- **Design Review (optional):** Use your judgment. Recommend it for UI/UX changes. Skip for backend-only, infra, or prompt-only changes.
-- **Adversarial Review (automatic):** Always-on for every review. Every diff gets both Claude adversarial subagent and Codex adversarial challenge. Large diffs (200+ lines) additionally get Codex structured review with P1 gate. No configuration needed.
-- **Outside Voice (optional):** Independent plan review from a different AI model. Offered after all review sections complete in /plan-ceo-review and /plan-eng-review. Falls back to Claude subagent if Codex is unavailable. Never gates shipping.
-
-**Verdict logic:**
-- **CLEARED**: Eng Review has >= 1 entry within 7 days from either \`review\` or \`plan-eng-review\` with status "clean" (or \`skip_eng_review\` is \`true\`)
-- **NOT CLEARED**: Eng Review missing, stale (>7 days), or has open issues
-- CEO, Design, and Codex reviews are shown for context but never block shipping
-- If \`skip_eng_review\` config is \`true\`, Eng Review shows "SKIPPED (global)" and verdict is CLEARED
-
-**Staleness detection:** After displaying the dashboard, check if any existing reviews may be stale:
-- Parse the \`---HEAD---\` section from the bash output to get the current HEAD commit hash
-- For each review entry that has a \`commit\` field: compare it against the current HEAD. If different, count elapsed commits: \`git rev-list --count STORED_COMMIT..HEAD\`. Display: "Note: {skill} review from {date} may be stale — {N} commits since review"
-- For entries without a \`commit\` field (legacy entries): display "Note: {skill} review from {date} has no commit tracking — consider re-running for accurate staleness detection"
-- If all reviews match the current HEAD, do not display any staleness notes
-
-## Plan File Review Report
-
-After displaying the Review Readiness Dashboard in conversation output, also update the
-**plan file** itself so review status is visible to anyone reading the plan.
-
-### Detect the plan file
-
-1. Check if there is an active plan file in this conversation (the host provides plan file
-   paths in system messages — look for plan file references in the conversation context).
-2. If not found, skip this section silently — not every review runs in plan mode.
-
-### Generate the report
-
-Read the review log output you already have from the Review Readiness Dashboard step above.
-Parse each JSONL entry. Each skill logs different fields:
-
-- **plan-ceo-review**: \`status\`, \`unresolved\`, \`critical_gaps\`, \`mode\`, \`scope_proposed\`, \`scope_accepted\`, \`scope_deferred\`, \`commit\`
-  → Findings: "{scope_proposed} proposals, {scope_accepted} accepted, {scope_deferred} deferred"
-  → If scope fields are 0 or missing (HOLD/REDUCTION mode): "mode: {mode}, {critical_gaps} critical gaps"
-- **plan-eng-review**: \`status\`, \`unresolved\`, \`critical_gaps\`, \`issues_found\`, \`mode\`, \`commit\`
-  → Findings: "{issues_found} issues, {critical_gaps} critical gaps"
-- **plan-design-review**: \`status\`, \`initial_score\`, \`overall_score\`, \`unresolved\`, \`decisions_made\`, \`commit\`
-  → Findings: "score: {initial_score}/10 → {overall_score}/10, {decisions_made} decisions"
-- **plan-devex-review**: \`status\`, \`initial_score\`, \`overall_score\`, \`product_type\`, \`tthw_current\`, \`tthw_target\`, \`mode\`, \`persona\`, \`competitive_tier\`, \`unresolved\`, \`commit\`
-  → Findings: "score: {initial_score}/10 → {overall_score}/10, TTHW: {tthw_current} → {tthw_target}"
-- **devex-review**: \`status\`, \`overall_score\`, \`product_type\`, \`tthw_measured\`, \`dimensions_tested\`, \`dimensions_inferred\`, \`boomerang\`, \`commit\`
-  → Findings: "score: {overall_score}/10, TTHW: {tthw_measured}, {dimensions_tested} tested/{dimensions_inferred} inferred"
-- **codex-review**: \`status\`, \`gate\`, \`findings\`, \`findings_fixed\`
-  → Findings: "{findings} findings, {findings_fixed}/{findings} fixed"
-
-All fields needed for the Findings column are now present in the JSONL entries.
-For the review you just completed, you may use richer details from your own Completion
-Summary. For prior reviews, use the JSONL fields directly — they contain all required data.
-
-Produce this markdown table:
-
-\`\`\`markdown
-## GSTACK REVIEW REPORT
-
-| Review | Trigger | Why | Runs | Status | Findings |
-|--------|---------|-----|------|--------|----------|
-| CEO Review | \`/plan-ceo-review\` | Scope & strategy | {runs} | {status} | {findings} |
-| Codex Review | \`/codex review\` | Independent 2nd opinion | {runs} | {status} | {findings} |
-| Eng Review | \`/plan-eng-review\` | Architecture & tests (required) | {runs} | {status} | {findings} |
-| Design Review | \`/plan-design-review\` | UI/UX gaps | {runs} | {status} | {findings} |
-| DX Review | \`/plan-devex-review\` | Developer experience gaps | {runs} | {status} | {findings} |
-\`\`\`
-
-Below the table, add these lines (omit any that are empty/not applicable):
-
-- **CODEX:** (only if codex-review ran) — one-line summary of codex fixes
-- **CROSS-MODEL:** (only if both Claude and Codex reviews exist) — overlap analysis
-- **UNRESOLVED:** total unresolved decisions across all reviews
-- **VERDICT:** list reviews that are CLEAR (e.g., "CEO + ENG CLEARED — ready to implement").
-  If Eng Review is not CLEAR and not skipped globally, append "eng review required".
-
-### Write to the plan file
-
-**PLAN MODE EXCEPTION — ALWAYS RUN:** This writes to the plan file, which is the one
-file you are allowed to edit in plan mode. The plan file review report is part of the
-plan's living status.
-
-The report must always be the LAST section of the plan file — never mid-file.
-Use a single delete-then-append flow:
-
-1. Read the plan file (Read tool) to see its full current content. Search the read
-   output for a \`## GSTACK REVIEW REPORT\` heading anywhere in the file.
-2. If found, use the Edit tool to DELETE the entire existing section. Match from
-   \`## GSTACK REVIEW REPORT\` through either the next \`## \` heading or end of
-   file, whichever comes first. Replace with the empty string. This applies
-   regardless of where the section currently lives — mid-file deletion is
-   intentional, not a special case. If the Edit fails (e.g., concurrent edit
-   changed the content), re-read the plan file and retry once.
-3. After the delete (or skipped, if no section existed), append the new
-   \`## GSTACK REVIEW REPORT\` section at the END of the file. Use the Edit
-   tool to match the file's current last paragraph and add the section after it,
-   or use Write to re-emit the whole file with the section at the end.
-4. Verify with the Read tool that \`## GSTACK REVIEW REPORT\` is the last
-   \`## \` heading in the file before continuing. If it isn't, repeat steps
-   2-3 once.
-
-Do NOT replace the section in place. The "replace mid-file" path is what allowed
-prior versions to leave the report mid-file when an older report already lived
-there — the user then sees a plan whose review report is not at the bottom and
-(correctly) rejects it.
-
-## Capture Learnings
-
-If you discovered a non-obvious pattern, pitfall, or architectural insight during
-this session, log it for future sessions:
+**PLAN MODE EXCEPTION — ALWAYS RUN:** This command writes review metadata to
+`~/.gstack/` (user config directory, not project files).
 
 ```bash
-~/.claude/skills/gstack/bin/gstack-learnings-log '{"skill":"plan-devex-review","type":"TYPE","key":"SHORT_KEY","insight":"DESCRIPTION","confidence":N,"source":"SOURCE","files":["path/to/relevant/file"]}'
+~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"plan-devex-review","timestamp":"TIMESTAMP","status":"STATUS","initial_score":N,"overall_score":N,"product_type":"TYPE","tthw_current":"TTHW_CURRENT","tthw_target":"TTHW_TARGET","mode":"MODE","persona":"PERSONA","competitive_tier":"TIER","pass_scores":{"getting_started":N,"api_design":N,"errors":N,"docs":N,"upgrade":N,"dev_env":N,"community":N,"measurement":N},"unresolved":N,"commit":"COMMIT"}'
 ```
 
-**Types:** `pattern` (reusable approach), `pitfall` (what NOT to do), `preference`
-(user stated), `architecture` (structural decision), `tool` (library/framework insight),
-`operational` (project environment/CLI/workflow knowledge).
-
-**Sources:** `observed` (you found this in the code), `user-stated` (user told you),
-`inferred` (AI deduction), `cross-model` (both Claude and Codex agree).
-
-**Confidence:** 1-10. Be honest. An observed pattern you verified in the code is 8-9.
-An inference you're not sure about is 4-5. A user preference they explicitly stated is 10.
-
-**files:** Include the specific file paths this learning references. This enables
-staleness detection: if those files are later deleted, the learning can be flagged.
-
-**Only log genuine discoveries.** Don't log obvious things. Don't log things the user
-already knows. A good test: would this insight save time in a future session? If yes, log it.
+Substitute values from the DX Scorecard. MODE is EXPANSION/POLISH/TRIAGE.
+PERSONA is a short label (e.g., "yc-founder", "platform-eng").
+TIER is Champion/Competitive/NeedsWork/RedFlag.
 
 
 
-## Brain Calibration Write-Back (Phase 2 / gated)
-
-When the skill makes a typed prediction worth tracking (scope decision,
-TTHW target, architectural bet, wedge commitment), it MAY write a
-`kind=bet` take to the brain so a calibration profile builds over time.
-
-**Gated on two things:**
-1. Brain trust policy for the active endpoint is `personal` (check via
-   `~/.claude/skills/gstack/bin/gstack-config get brain_trust_policy@<endpoint-hash>`).
-   Shared brains skip write-back to avoid polluting team calibration.
-2. Feature flag `BRAIN_CALIBRATION_WRITEBACK` is set (today: false; flips
-   to true when upstream gbrain v0.42+ ships `takes_add` MCP op).
-
-When both gates pass, the write-back path uses `mcp__gbrain__takes_add`
-to record a take with weight 0.6 (per SKILL_CALIBRATION_WEIGHTS).
-If the MCP op is unavailable, fall back to `mcp__gbrain__put_page` with
-a gstack:takes fence block (documented but uglier path).
-
-Mandatory take frontmatter shape:
-```yaml
-kind: bet
-holder: <user identity from whoami>
-claim: <one-line prediction the skill is making>
-weight: 0.6
-since_date: <today's date>
-expected_resolution: <date in 1-3 months depending on skill>
-source_skill: plan-devex-review
-```
-
-After write, invalidate the affected digests so the next preflight reflects
-the new state:
-
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" 2>/dev/null || true
-  ~/.claude/skills/gstack/bin/gstack-brain-cache invalidate developer-persona --project "$SLUG" 2>/dev/null || true
-```
 
 
-## Brain Cache Background Refresh
-
-After the skill's work completes (and telemetry has logged), kick a
-background refresh of any cache digest that's getting close to its TTL.
-This is non-blocking — the user doesn't wait. Next invocation benefits
-from the warm cache.
-
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" 2>/dev/null || true
-(~/.claude/skills/gstack/bin/gstack-brain-cache refresh --project "$SLUG" 2>/dev/null &) || true
-```
 
 
 ## Next Steps — Review Chaining
@@ -2184,28 +1855,3 @@ Outside voice| Recommended      | Recommended        | Skip
 * One sentence max per option.
 * After each pass, pause and wait for feedback before moving on.
 * Rate before and after each pass for scannability.
-
-## EXIT PLAN MODE GATE (BLOCKING)
-
-Before calling ExitPlanMode, run this self-check. If any item fails, do the
-missing work — do NOT call ExitPlanMode:
-
-1. Read the plan file with the Read tool (after your most recent write to it).
-2. Confirm the LAST `## ` heading in the file is `## GSTACK REVIEW REPORT`.
-   In-body prose that mentions "outside voice", "codex findings", or similar
-   does NOT count — only the structured `## GSTACK REVIEW REPORT` section
-   satisfies this check.
-3. Confirm the report contains: a Runs / Status / Findings table, a VERDICT
-   line, and absorbs CODEX / CROSS-MODEL / UNRESOLVED lines if applicable.
-4. If a plan file is in context for this skill invocation: confirm
-   `gstack-review-log` was called and `gstack-review-read` was run at least
-   once. If no plan file is in context (e.g. `/codex consult` against a
-   diff with no plan), this check short-circuits — checks 1-3 already
-   short-circuit when no plan file exists.
-
-Failing this gate and calling ExitPlanMode anyway is a contract violation —
-the user will see a plan whose review report is missing or stale, and will
-(correctly) reject it. Self-deception failure mode to watch for: feeling
-"done" after writing review prose into the plan body. The body prose is not
-the report. The report is a separate, structured, table-bearing section that
-must be the file's terminal heading.
