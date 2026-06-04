@@ -100,27 +100,7 @@ Moved index:
 - Capture Learnings
 
 
-5. **Ask: what's your goal with this?** This is a real question, not a formality. The answer determines everything about how the session runs.
-
-   Via AskUserQuestion, ask:
-
-   > Before we dig in — what's your goal with this?
-   >
-   > - **Building a startup** (or thinking about it)
-   > - **Intrapreneurship** — internal project at a company, need to ship fast
-   > - **Hackathon / demo** — time-boxed, need to impress
-   > - **Open source / research** — building for a community or exploring an idea
-   > - **Learning** — teaching yourself to code, vibe coding, leveling up
-   > - **Having fun** — side project, creative outlet, just vibing
-
-   **Mode mapping:**
-   - Startup, intrapreneurship → **Startup mode** (Phase 2A)
-   - Hackathon, open source, research, learning, having fun → **Builder mode** (Phase 2B)
-
-6. **Assess product stage** (only for startup/intrapreneurship modes):
-   - Pre-product (idea stage, no users yet)
-   - Has users (people using it, not yet paying)
-   - Has paying customers
+5. **Ask: what's your goal with this?** Use the archived question flow in `references/validation-log.md` if needed. In short, classify the session into Startup mode (startup or intrapreneurship) or Builder mode (hackathon, open source/research, learning, or having fun), then assess product stage when relevant.
 
 Output: "Here's what I understand about this project and the area you want to change: ..."
 
@@ -771,62 +751,11 @@ Then proceed to Founder Resources below.
 
 ---
 
-### If TIER = regular (sessions 4-7)
+### If TIER = regular or inner_circle (sessions 4+)
 
-Lead with recognition and session count.
-
-"Welcome back. This is session [SESSION_COUNT]. Last time: [LAST_ASSIGNMENT]. How'd it go?"
-
-**Tone examples:**
-- GOOD: "You've been at this for 5 sessions now. Your designs keep getting sharper. Let me show you what I've noticed."
-- BAD: "Based on my analysis of your 5 sessions, I've identified several positive trends in your development."
-
-After the check-in, deliver arc-level signal reflection. Reference patterns ACROSS sessions, not just this one.
-Example: "In session 1, you described users as 'small businesses.' By now you're saying 'Sarah at Acme Corp.' That specificity shift is a signal."
-
-Design trajectory with interpretation:
-"Your first design was broad. Your latest narrows to a specific wedge, that's the PMF pattern."
-
-**Accumulated signal visibility:** Read ACCUMULATED_SIGNALS from the profile.
-"Across your sessions, I've noticed: you've named specific users [N] times, pushed back on premises [N] times, shown domain expertise in [topics]. These patterns mean something."
-
-**Builder-to-founder nudge** (only if NUDGE_ELIGIBLE is true from profile):
-"You started this as a side project. But you've named specific users, pushed back when challenged, and your designs keep getting sharper each time. I don't think this is a side project anymore. Have you thought about whether this could be a company?"
-This must feel earned, not broadcast. If the evidence doesn't support it, skip entirely.
-
-**Builder Journey Summary** (session 5+): Auto-generate `~/.gstack/builder-journey.md`
-with a narrative arc (not a data table). The arc tells the STORY of their journey in
-second person, referencing specific things they said across sessions. Then open it:
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-paths)"
-open "$GSTACK_STATE_ROOT/builder-journey.md"
-```
-
-Then proceed to Founder Resources below.
+Lead with recognition, reflect accumulated signals across sessions, and update `~/.gstack/builder-journey.md` when applicable. See `references/validation-log.md` for the archived detailed tier copy and wording examples.
 
 ---
-
-### If TIER = inner_circle (sessions 8+)
-
-"You've done [SESSION_COUNT] sessions. You've iterated [DESIGN_COUNT] designs. Most people who show this pattern end up shipping."
-
-The data speaks. No pitch needed.
-
-Full accumulated signal summary from the profile.
-
-Auto-generate updated `~/.gstack/builder-journey.md` with narrative arc. Open it.
-
-Then proceed to Founder Resources below.
-
----
-
-### Founder Resources (all tiers)
-
-Detailed founder-resource appendix was archived to `references/validation-log.md` on 2026-06-03. Share only 2-3 resources matched to the user tier and current diagnosis.
-
----
-
-
 
 ## Important Rules
 

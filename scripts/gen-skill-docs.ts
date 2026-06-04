@@ -886,6 +886,7 @@ function findTemplates(): string[] {
 const ALL_HOSTS: Host[] = ALL_HOST_NAMES as Host[];
 const hostsToRun: Host[] = HOST_ARG_VAL === 'all' ? ALL_HOSTS : [HOST];
 const failures: { host: string; error: Error }[] = [];
+const sizeFreezeViolations: { skill: string; bytes: number }[] = [];
 
 for (const currentHost of hostsToRun) {
   HOST = currentHost;
@@ -955,16 +956,23 @@ for (const currentHost of hostsToRun) {
       const tokens = Math.round(content.length / 4); // ~4 chars per token
       tokenBudget.push({ skill: relOutput, lines, tokens });
 
-      // Token ceiling check: warn if any generated SKILL.md exceeds ~40K tokens (160KB).
-      // The ceiling is a "watch for feature bloat" guardrail, not a hard gate. Modern
-      // flagship models have 200K-1M context windows, so 40K (4-20% of window) is fine.
-      // Prompt caching further reduces the marginal cost of larger skills. This ceiling
-      // exists to catch a runaway preamble or resolver that's grown by 10K+ tokens in
-      // a release, not to force compression on carefully-tuned big skills (ship,
-      // plan-ceo-review, office-hours all legitimately pack 25-35K tokens of behavior).
-      const TOKEN_CEILING_BYTES = 160_000;
-      if (content.length > TOKEN_CEILING_BYTES) {
-        console.warn(`⚠️  TOKEN CEILING: ${relOutput} is ${content.length} bytes (~${tokens} tokens), exceeds ${TOKEN_CEILING_BYTES} byte ceiling (~40K tokens)`);
+      // Freeze-wall guard. Hermes excludes any skill >= 100K bytes from its
+      // patch loop ("freezes" it). A regen must never silently push a skill
+      // back over that wall. 95K is the warn line (headroom); 100K is the hard
+      // gate enforced after all hosts run (see SIZE_FREEZE_WALL_BYTES below).
+      // pre-existing-debt allowlist: spec + plan-eng-review are already > 100K
+      // on every host and are tracked for compression under a separate card.
+      // Exclude them here so this gate protects everything else without
+      // failing the build on known debt.
+      const SIZE_WARN_BYTES = 95_000;
+      const SIZE_FREEZE_WALL_BYTES = 100_000;
+      const SIZE_DEBT_ALLOWLIST = ['gstack-spec', 'spec', 'gstack-plan-eng-review', 'plan-eng-review'];
+      const skillBase = path.basename(path.dirname(outputPath));
+      if (content.length >= SIZE_WARN_BYTES && content.length < SIZE_FREEZE_WALL_BYTES) {
+        console.warn(`⚠️  SIZE WARN: ${relOutput} is ${content.length} bytes (>= ${SIZE_WARN_BYTES}, under ${SIZE_FREEZE_WALL_BYTES} freeze wall)`);
+      }
+      if (content.length >= SIZE_FREEZE_WALL_BYTES && !SIZE_DEBT_ALLOWLIST.includes(skillBase)) {
+        sizeFreezeViolations.push({ skill: relOutput, bytes: content.length });
       }
     }
 
@@ -1140,6 +1148,16 @@ if (failures.length > 0 && HOST_ARG_VAL === 'all') {
   process.exit(1);
 }
 // Single host dry-run failure already handled above
+
+// Freeze-wall gate (fires on every run, not just --host all). If any generated
+// SKILL.md crossed the 100K Hermes freeze wall, fail the build so a regen can
+// never silently re-freeze a skill and break the patch loop. Pre-existing-debt
+// skills are excluded at collection time (SIZE_DEBT_ALLOWLIST above).
+if (sizeFreezeViolations.length > 0) {
+  console.error(`\n${sizeFreezeViolations.length} skill(s) crossed the 100K freeze wall:`);
+  for (const v of sizeFreezeViolations) console.error(`  ${v.skill}: ${v.bytes} bytes`);
+  process.exit(1);
+}
 
 // After all hosts processed, warn if prefix patches may need re-applying
 if (!DRY_RUN) {
