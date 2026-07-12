@@ -1,0 +1,5 @@
+5b7784c4852c273e5a5bb0c87eb3c6ba1d4eb8dd8fb663ff4013fd831d9e703b  tasks/artifacts/2026-07-12-gstack-sync-safety-caller-implementation-v3/allowlist-and-worktree-proof.md
+70e011a624e9cab0372173fef820a287bd2a65cf4471cda58b1e6cd9ac746dd5  tasks/artifacts/2026-07-12-gstack-sync-safety-caller-implementation-v3/diff.patch
+d2ab2f8bc99d74771f9901aa1597615d9397776a7cd30d3e497ecc1e2c676fe0  tasks/artifacts/2026-07-12-gstack-sync-safety-caller-implementation-v3/static-sync-call-audit.md
+e77bcf223482b9a0e1bebd1ff7c6f61a63e5bb4f1b670bc8d93329137fbfecd1  tasks/artifacts/2026-07-12-gstack-sync-safety-caller-implementation-v3/focused-test-output.md
+4cfa5cb42105575c858d61d1672e50012b8618dba09d1c4df4160ed7fb633147  tasks/artifacts/2026-07-12-gstack-sync-safety-caller-implementation-v3/build-output.md

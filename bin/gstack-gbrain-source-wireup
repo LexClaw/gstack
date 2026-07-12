@@ -128,24 +128,49 @@ safe_rm_worktree() {
 }
 
 # ---- source-id derivation (D6 multi-fallback) ----
+validate_source_id() {
+  local id="$1"
+  [ -n "$id" ] || die "source id is empty" 3
+  case "$id" in
+    default|seed_default)
+      die "refusing unsafe source id '$id'; pass a dedicated source id" 1 ;;
+  esac
+  case "$id" in
+    *[!a-z0-9-]* | -* | *- )
+      die "source id must be lowercase alphanumeric plus interior hyphens: $id" 1 ;;
+  esac
+}
+
 derive_source_id() {
+  local id=""
   if [ -n "$SOURCE_ID" ]; then
-    echo "$SOURCE_ID"; return 0
+    id="$SOURCE_ID"
+  elif [ -n "${GSTACK_BRAIN_SOURCE_ID:-}" ]; then
+    id="$GSTACK_BRAIN_SOURCE_ID"
+  else
+    local remote_url=""
+    remote_url=$(git -C "$GSTACK_HOME" remote get-url origin 2>/dev/null) || true
+    if [ -z "$remote_url" ] && [ -f "$REMOTE_FILE" ]; then
+      remote_url=$(head -1 "$REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
+    [ -z "$remote_url" ] && return 3
+    id=$(basename "$remote_url" .git \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr -c 'a-z0-9-' '-' \
+      | sed 's/--*/-/g; s/^-//; s/-$//' \
+      | cut -c1-32)
   fi
-  if [ -n "${GSTACK_BRAIN_SOURCE_ID:-}" ]; then
-    echo "$GSTACK_BRAIN_SOURCE_ID"; return 0
+  echo "$id"
+}
+
+assert_source_pin() {
+  local id="$1" pin_file="$WORKTREE/.gbrain-source" pinned=""
+  if [ -f "$pin_file" ]; then
+    pinned=$(head -1 "$pin_file" | tr -d '[:space:]')
+    [ "$pinned" = "$id" ] || die "source pin mismatch in $pin_file: expected $id, found ${pinned:-empty}" 1
+    return 0
   fi
-  local remote_url=""
-  remote_url=$(git -C "$GSTACK_HOME" remote get-url origin 2>/dev/null) || true
-  if [ -z "$remote_url" ] && [ -f "$REMOTE_FILE" ]; then
-    remote_url=$(head -1 "$REMOTE_FILE" 2>/dev/null | tr -d '[:space:]')
-  fi
-  [ -z "$remote_url" ] && return 3
-  basename "$remote_url" .git \
-    | tr '[:upper:]' '[:lower:]' \
-    | tr -c 'a-z0-9-' '-' \
-    | sed 's/--*/-/g; s/^-//; s/-$//' \
-    | cut -c1-32
+  printf '%s\n' "$id" > "$pin_file" || die "failed writing source pin $pin_file" 1
 }
 
 # ---- gbrain version gate ----
@@ -256,6 +281,7 @@ do_probe() {
 do_wireup() {
   local id
   id=$(derive_source_id) || die "cannot derive source id (no .git, no remote-file, no --source-id)" 2
+  validate_source_id "$id"
 
   if ! gbrain_version_ok; then
     if [ "$STRICT" = "1" ]; then
@@ -282,7 +308,9 @@ do_wireup() {
     *) die "git worktree creation failed at $WORKTREE" 1 ;;
   esac
 
-  # Source registration: probe state, then act.
+  # Source registration: probe state, then act. Runtime source-path repair is
+  # intentionally forbidden here: a different registered root is unsafe even
+  # when the basename matches. Repair belongs to a reviewed source transaction.
   set +e
   check_source_state "$id"
   local sstate=$?
@@ -290,29 +318,19 @@ do_wireup() {
   case "$sstate" in
     0) : ;;  # already correctly registered
     1)
-      # Multi-Mac case: if the existing path also looks like another machine's
-      # brain-worktree (same basename, different parent), don't ping-pong the
-      # registration. Just sync from our local worktree — gbrain stores pages
-      # by content, not by local_path. The metadata is informational only.
       local existing_path
       existing_path=$(gbrain sources list --json 2>/dev/null \
         | jq -r --arg id "$id" '.sources[] | select(.id==$id) | .local_path' 2>/dev/null \
         | tr -d '[:space:]') || existing_path=""
-      if [ "$(basename "$existing_path")" = "$(basename "$WORKTREE")" ] \
-         && [ "$existing_path" != "$WORKTREE" ]; then
-        warn "source $id is registered at $existing_path (likely another machine's local copy of the same brain repo). Skipping re-registration; will sync from local worktree."
-      else
-        warn "source $id registered with different path; recreating (gbrain has no 'sources update')"
-        gbrain sources remove "$id" --yes 2>&1 | prefix || die "gbrain sources remove failed" 1
-        gbrain sources add "$id" --path "$WORKTREE" --federated 2>&1 | prefix \
-          || die "gbrain sources add failed" 1
-      fi
+      die "source $id is registered at ${existing_path:-unknown}, not $WORKTREE; refusing sync until source-path repair is reviewed" 1
       ;;
     2)
       gbrain sources add "$id" --path "$WORKTREE" --federated 2>&1 | prefix \
         || die "gbrain sources add failed" 1
       ;;
   esac
+
+  assert_source_pin "$id"
 
   if [ "${GSTACK_BRAIN_NO_SYNC:-0}" = "1" ]; then
     echo "source_id=$id"
@@ -322,7 +340,7 @@ do_wireup() {
   fi
 
   local sync_out sync_redacted
-  sync_out=$(gbrain sync --repo "$WORKTREE" 2>&1) || {
+  sync_out=$(gbrain sync --source "$id" --repo "$WORKTREE" 2>&1) || {
     # Redact any postgres:// URLs from the error message in case gbrain logged
     # a connection error containing the full DSN with password. The user sees
     # "***REDACTED***" instead of credentials in their stderr or any log.
@@ -339,6 +357,7 @@ do_wireup() {
 do_uninstall() {
   local id
   id=$(derive_source_id) || die "cannot derive source id; pass --source-id <id> explicitly" 3
+  validate_source_id "$id"
 
   if command -v gbrain >/dev/null 2>&1; then
     gbrain sources remove "$id" --yes 2>&1 | prefix || warn "gbrain sources remove failed (continuing)"

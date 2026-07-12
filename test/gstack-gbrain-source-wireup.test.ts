@@ -168,17 +168,21 @@ afterEach(() => {
 });
 
 describe('gstack-gbrain-source-wireup — wireup mode', () => {
-  test('fresh state: registers source + creates worktree + syncs', () => {
+  test('fresh state: registers source + creates worktree + writes pin + syncs with source', () => {
     setupGstackRepo('git@github.com:user/gstack-brain-user.git');
     makeFakeGbrain({});
-    const r = run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    const r = run([]);
     expect(r.status).toBe(0);
     expect(fs.existsSync(worktreeDir)).toBe(true);
+    expect(fs.readFileSync(path.join(worktreeDir, '.gbrain-source'), 'utf-8').trim()).toBe('gstack-brain-user');
     const state = readState();
     expect(state.sources).toHaveLength(1);
     expect(state.sources[0].id).toBe('gstack-brain-user');
     expect(state.sources[0].local_path).toBe(worktreeDir);
     expect(state.sources[0].federated).toBe(true);
+    const calls = gbrainCalls();
+    expect(calls.some((c) => c.startsWith(`gbrain sync --source gstack-brain-user --repo ${worktreeDir}`))).toBe(true);
+    expect(calls.some((c) => c.startsWith('gbrain sync ') && c.includes(`--repo ${worktreeDir}`) && !c.includes('--source'))).toBe(false);
   });
 
   test('idempotent re-run after success: no new sources add call', () => {
@@ -192,10 +196,9 @@ describe('gstack-gbrain-source-wireup — wireup mode', () => {
     expect(callsAfterSecond).toBe(1); // no new add
   });
 
-  test('drift recovery: existing source with different path triggers remove + add', () => {
+  test('drift guard: existing source with different path fails closed before sync', () => {
     setupGstackRepo('git@github.com:user/gstack-brain-user.git');
     makeFakeGbrain({});
-    // Pre-seed the fake gbrain state with a source at the wrong path
     fs.writeFileSync(
       gbrainStateFile,
       JSON.stringify({
@@ -203,12 +206,51 @@ describe('gstack-gbrain-source-wireup — wireup mode', () => {
       })
     );
     const r = run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('refusing sync until source-path repair is reviewed');
     const calls = gbrainCalls();
-    expect(calls.some((c) => c.startsWith('gbrain sources remove gstack-brain-user'))).toBe(true);
-    expect(calls.some((c) => c.includes(`gbrain sources add gstack-brain-user --path ${worktreeDir}`))).toBe(true);
+    expect(calls.some((c) => c.startsWith('gbrain sources remove gstack-brain-user'))).toBe(false);
+    expect(calls.some((c) => c.startsWith('gbrain sync'))).toBe(false);
     const state = readState();
-    expect(state.sources[0].local_path).toBe(worktreeDir);
+    expect(state.sources[0].local_path).toBe('/old/stale/path');
+  });
+
+  test('same-basename different root is unsafe and fails closed', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({});
+    fs.writeFileSync(
+      gbrainStateFile,
+      JSON.stringify({
+        sources: [{ id: 'gstack-brain-user', local_path: path.join(tmpHome, 'other-parent', path.basename(worktreeDir)), federated: true }],
+      })
+    );
+    const r = run([]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('refusing sync until source-path repair is reviewed');
+    expect(gbrainCalls().some((c) => c.startsWith('gbrain sync'))).toBe(false);
+  });
+
+  test('source pin mismatch fails closed before sync', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({});
+    const first = run([], { env: { GSTACK_BRAIN_NO_SYNC: '1' } });
+    expect(first.status).toBe(0);
+    fs.writeFileSync(path.join(worktreeDir, '.gbrain-source'), 'other-source\n');
+    const second = run([]);
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain('source pin mismatch');
+    expect(gbrainCalls().some((c) => c.startsWith('gbrain sync'))).toBe(false);
+  });
+
+  test('default source id is refused before registration or sync', () => {
+    setupGstackRepo('git@github.com:user/gstack-brain-user.git');
+    makeFakeGbrain({});
+    const r = run(['--source-id', 'default']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("refusing unsafe source id 'default'");
+    const calls = gbrainCalls();
+    expect(calls.some((c) => c.includes('sources add'))).toBe(false);
+    expect(calls.some((c) => c.startsWith('gbrain sync'))).toBe(false);
   });
 
   test('--strict + gbrain too old: exits 2', () => {
