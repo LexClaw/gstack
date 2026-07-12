@@ -17,7 +17,6 @@ import {
   derivePathOnlyHashLegacyId,
   planHostnameFoldMigration,
   sourceLocalPath,
-  _resetGbrainSupportsRenameCache,
 } from "../bin/gstack-gbrain-sync";
 
 const SCRIPT = join(import.meta.dir, "..", "bin", "gstack-gbrain-sync.ts");
@@ -486,10 +485,10 @@ describe("gstack-gbrain-sync CLI", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("dry-run preview includes legacy-source removal + attach (post-codex-review hardening)", () => {
-    // Codex adversarial flagged: pre-pathhash `gstack-code-<slug>` sources stay
-    // orphaned forever after the new pathhash id ships. Dry-run preview must
-    // surface the legacy cleanup so the user knows it'll happen.
+  it("dry-run preview includes the external enrollment validation step", () => {
+    // Current safety contract does not write a mutable checkout pin or remove
+    // legacy sources. It validates an enrollment stored outside the repo before
+    // any sync side effect.
     const home = makeTestHome();
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
@@ -504,14 +503,7 @@ describe("gstack-gbrain-sync CLI", () => {
       env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
     });
     expect(r.status).toBe(0);
-    // The dry-run preview shows what WOULD run; the live path will also
-    // remove the legacy source via `gbrain sources remove gstack-code-<slug>
-    // --confirm-destructive` when that legacy source is registered. We can't
-    // assert the remove step in dry-run because the orchestrator's preview
-    // string lists what it would do, but the legacy removal is gated on the
-    // legacy id being registered (which we can't probe in a sandboxed test
-    // without a real gbrain CLI). Instead, assert the preview still includes
-    // the new flow (sources add + sync + attach) at minimum.
+    // Assert the preview still includes the new fail-closed flow.
     expect(r.stdout).toMatch(/--source gstack-code-/);
     expect(r.stdout).toMatch(/validate external enrollment/);
 
@@ -656,11 +648,9 @@ describe("planHostnameFoldMigration", () => {
 
   beforeEach(() => {
     bindir = mkdtempSync(join(tmpdir(), "gstack-mig-plan-bin-"));
-    _resetGbrainSupportsRenameCache();
   });
   afterEach(() => {
     rmSync(bindir, { recursive: true, force: true });
-    _resetGbrainSupportsRenameCache();
   });
 
   it("returns ids-match when legacy == new (degenerate case)", () => {
@@ -691,44 +681,16 @@ describe("planHostnameFoldMigration", () => {
     }
   });
 
-  it("returns renamed when rename is supported and exits 0", () => {
+  it("returns manual-disposition-required when legacy source points at current repo root", () => {
     makeShim(bindir, {
       "sources list --json": {
         stdout: JSON.stringify([{ id: "legacy-id", local_path: "/repo/here" }]),
       },
-      "sources rename --help": {
-        stdout: "Usage: gbrain sources rename <old> <new>\n",
-      },
-      "sources rename legacy-id new-id": { exit: 0 },
     });
     const result = planHostnameFoldMigration("/repo/here", "new-id", "legacy-id", envWithBindir(bindir));
-    expect(result).toEqual({ kind: "renamed", oldId: "legacy-id", newId: "new-id" });
+    expect(result).toEqual({ kind: "manual-disposition-required", oldId: "legacy-id", oldPath: "/repo/here", newId: "new-id" });
   });
 
-  it("returns pending-cleanup when rename is unsupported (current gbrain 0.35.0.0)", () => {
-    makeShim(bindir, {
-      "sources list --json": {
-        stdout: JSON.stringify([{ id: "legacy-id", local_path: "/repo/here" }]),
-      },
-      // No `sources rename --help` match → shim falls into the catch-all and exits 1.
-    });
-    const result = planHostnameFoldMigration("/repo/here", "new-id", "legacy-id", envWithBindir(bindir));
-    expect(result).toEqual({ kind: "pending-cleanup", oldId: "legacy-id" });
-  });
-
-  it("returns pending-cleanup when rename is supported but the rename call itself fails", () => {
-    makeShim(bindir, {
-      "sources list --json": {
-        stdout: JSON.stringify([{ id: "legacy-id", local_path: "/repo/here" }]),
-      },
-      "sources rename --help": {
-        stdout: "Usage: gbrain sources rename <old> <new>\n",
-      },
-      "sources rename legacy-id new-id": { exit: 1, stderr: "rename failed: db locked" },
-    });
-    const result = planHostnameFoldMigration("/repo/here", "new-id", "legacy-id", envWithBindir(bindir));
-    expect(result).toEqual({ kind: "pending-cleanup", oldId: "legacy-id" });
-  });
 });
 
 describe("constrainSourceId truncation (hyphen-boundary cut)", () => {

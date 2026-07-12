@@ -72,6 +72,13 @@ export interface CapabilityGateResult {
   capabilities?: string[];
 }
 
+export interface CollisionDisposition {
+  ok: boolean;
+  reason: string;
+  legacy_id?: string;
+  legacy_path?: string;
+}
+
 export interface EnrollmentPaths {
   enrollmentPath: string;
   setupPath: string;
@@ -254,6 +261,36 @@ export function validateEnrollment(record: EnrollmentRecord, repo: RepoIdentity,
   if (!row) throw new Error("enrolled source is missing from gbrain");
   if (row.local_path !== repo.canonical_root) throw new Error("registered source root drift");
   if (sourceGeneration(row) !== record.source.source_generation) throw new Error("source registration generation changed");
+}
+
+export function legacySourceId(repo: RepoIdentity): string {
+  const remoteParts = repo.remote?.split("/").filter(Boolean) || [];
+  const raw = remoteParts.length >= 2
+    ? remoteParts.slice(-2).join("-")
+    : repo.canonical_root.split(/[\\/]/).pop() || "repo";
+  const clean = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "repo";
+  return `gstack-code-${clean}`.slice(0, 32).replace(/-+$/g, "");
+}
+
+export function sourceCollisionDisposition(
+  sourceId: string,
+  repo: RepoIdentity,
+  env: NodeJS.ProcessEnv = process.env,
+): CollisionDisposition {
+  const raw = execGbrainJson<unknown>(["sources", "list", "--json"], { baseEnv: env });
+  if (raw === null) {
+    return { ok: false, reason: "cannot read gbrain sources list for source-collision disposition" };
+  }
+  const oldId = legacySourceId(repo);
+  if (oldId === sourceId) return { ok: true, reason: "ok" };
+  const row = parseSourcesList(raw).find((s) => s.id === oldId);
+  if (!row) return { ok: true, reason: "ok" };
+  return {
+    ok: false,
+    legacy_id: oldId,
+    legacy_path: row.local_path,
+    reason: `legacy source ${oldId} requires explicit collision migration/disposition before syncing`,
+  };
 }
 
 export function capabilityGate(env: NodeJS.ProcessEnv = process.env): CapabilityGateResult {

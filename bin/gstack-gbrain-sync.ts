@@ -38,7 +38,7 @@ import { createHash } from "crypto";
 import "../lib/conductor-env-shim";
 import { detectEngineTier, withErrorContext, canonicalizeRemote } from "../lib/gstack-memory-helpers";
 import { ensureSourceRegistered, sourcePageCount, parseSourcesList } from "../lib/gbrain-sources";
-import { detectAutopilot, decideSourceRemove, decideCodeSync } from "../lib/gbrain-guards";
+import { detectAutopilot, decideCodeSync } from "../lib/gbrain-guards";
 import { localEngineStatus, type LocalEngineStatus } from "../lib/gbrain-local-status";
 import { buildGbrainEnv, spawnGbrain, execGbrainJson, NEEDS_SHELL_ON_WINDOWS } from "../lib/gbrain-exec";
 import {
@@ -51,6 +51,7 @@ import {
   newSetupOperation,
   readEnrollment,
   realRepoIdentity,
+  sourceCollisionDisposition,
   sourceGeneration,
   validateEnrollment,
   writeEnrollment,
@@ -350,10 +351,9 @@ function deriveLegacyCodeSourceId(repoPath: string): string {
  * repo path: `gstack-code-<slug>-<sha1(path).slice(0,8)>`. After #1468 the
  * hash key is `${hostname}::${path}`, so every existing user's brain has a
  * legacy id that no longer matches what `deriveCodeSourceId` produces. We
- * detect this form once, attempt rename-in-place if the gbrain CLI supports
- * `sources rename`, and otherwise clean up after the new source successfully
- * syncs. Distinct from `deriveLegacyCodeSourceId` (pre-pathhash v1.x form);
- * both probes run.
+ * detect this form and require explicit source-collision disposition before
+ * ordinary sync proceeds. Distinct from `deriveLegacyCodeSourceId` (pre-pathhash
+ * v1.x form); both probes run.
  */
 export function derivePathOnlyHashLegacyId(repoPath: string): string {
   const pathHash = createHash("sha1").update(repoPath).digest("hex").slice(0, 8);
@@ -365,41 +365,6 @@ export function derivePathOnlyHashLegacyId(repoPath: string): string {
   }
   const base = repoPath.split("/").pop() || "repo";
   return constrainSourceId("gstack-code", `${base}-${pathHash}`);
-}
-
-/**
- * Feature-check whether the installed gbrain CLI ships `sources rename <old> <new>`.
- *
- * Per the v1.40.0.0 design review: probing `gbrain sources rename --help` and
- * matching for the exact argument shape catches the case where gbrain's
- * `sources` parent help mentions a `rename` subcommand but the CLI doesn't
- * accept the `<old> <new>` form (or vice versa). Cached for the lifetime
- * of the process. As of gbrain 0.35.0.0 this command does not exist, so the
- * function returns false and the migration path falls back to register-new
- * + sync-OK + remove-old.
- */
-let _gbrainSupportsRenameCache: boolean | null = null;
-export function _resetGbrainSupportsRenameCache(): void {
-  _gbrainSupportsRenameCache = null;
-}
-function gbrainSupportsSourcesRename(env?: NodeJS.ProcessEnv): boolean {
-  if (_gbrainSupportsRenameCache !== null) return _gbrainSupportsRenameCache;
-  try {
-    const r = spawnGbrain(["sources", "rename", "--help"], {
-      timeout: 5_000,
-      baseEnv: env,
-    });
-    const out = `${r.stdout || ""}\n${r.stderr || ""}`;
-    // Match the exact argument shape: `rename <old> <new>` (with literal
-    // angle brackets in usage strings) or `rename OLD NEW`.
-    const exact = /sources\s+rename\s+<old>\s+<new>/i.test(out)
-      || /sources\s+rename\s+OLD\s+NEW/.test(out)
-      || /sources\s+rename\s+<oldId>\s+<newId>/i.test(out);
-    _gbrainSupportsRenameCache = exact && r.status === 0;
-  } catch {
-    _gbrainSupportsRenameCache = false;
-  }
-  return _gbrainSupportsRenameCache;
 }
 
 /**
@@ -428,8 +393,7 @@ export function sourceLocalPath(sourceId: string, env?: NodeJS.ProcessEnv): stri
 export type HostnameFoldMigration =
   | { kind: "none"; reason: "ids-match" | "no-legacy-source" }
   | { kind: "skipped-path-drift"; oldId: string; oldPath: string; currentPath: string }
-  | { kind: "renamed"; oldId: string; newId: string }
-  | { kind: "pending-cleanup"; oldId: string };
+  | { kind: "manual-disposition-required"; oldId: string; oldPath: string; newId: string };
 
 /**
  * Decide how to migrate from the pre-#1468 path-only-hash source id to the
@@ -441,12 +405,8 @@ export type HostnameFoldMigration =
  *   3. local_path != currentRoot → user moved the repo or two machines share a
  *      hash slot. Skip migration; let the user clean up manually. We will NOT
  *      rename or remove anything; the new source is registered alongside.
- *   4. Otherwise: feature-check `gbrain sources rename`. If supported and the
- *      rename call exits 0 → renamed, pages preserved.
- *   5. Else: pending-cleanup. Caller registers + syncs new source first; only
- *      after sync succeeds with a non-zero page count does it remove the old.
- *      This avoids a data-loss window where the old source is gone before the
- *      new one is verifiably populated.
+ *   4. Otherwise: require explicit source-collision migration/disposition.
+ *      Ordinary sync refuses to rename, remove, recreate, or repair sources.
  */
 export function planHostnameFoldMigration(
   currentRoot: string,
@@ -469,60 +429,7 @@ export function planHostnameFoldMigration(
       currentPath: currentRoot,
     };
   }
-  if (gbrainSupportsSourcesRename(env)) {
-    const r = spawnGbrain(["sources", "rename", legacyPathHashId, newSourceId], { baseEnv: env });
-    if (r.status === 0) {
-      return { kind: "renamed", oldId: legacyPathHashId, newId: newSourceId };
-    }
-    // Rename failed at runtime — fall through to cleanup path.
-  }
-  return { kind: "pending-cleanup", oldId: legacyPathHashId };
-}
-
-export interface GuardedRemoveResult {
-  removed: boolean;
-  /** True when a guard refused the remove (autopilot active or unsafe source). */
-  skipped: boolean;
-  reason: string;
-}
-
-/**
- * #1734: run `gbrain sources remove <id> --confirm-destructive` only behind the
- * data-loss guards. Checked immediately before the destructive op (E8: as late
- * as possible) so the autopilot window is as small as we can make it without a
- * gbrain-side lease. Refuses when autopilot is active or when the source is
- * user-managed and gbrain can't keep its storage. Pure side-effect helper; the
- * caller decides whether a skip is fatal (it never is today — removes are
- * best-effort cleanup).
- */
-export function safeSourcesRemove(sourceId: string, env?: NodeJS.ProcessEnv): GuardedRemoveResult {
-  const ap = detectAutopilot(env);
-  if (ap.active) {
-    return {
-      removed: false,
-      skipped: true,
-      reason: `autopilot active (${ap.signal}); refusing destructive remove of ${sourceId}. ` +
-        `Stop autopilot, then re-run /sync-gbrain.`,
-    };
-  }
-  const decision = decideSourceRemove(sourceId, env);
-  if (!decision.allow) {
-    return { removed: false, skipped: true, reason: decision.reason };
-  }
-  const r = spawnGbrain(
-    ["sources", "remove", sourceId, "--confirm-destructive", ...decision.extraArgs],
-    { baseEnv: env },
-  );
-  return { removed: r.status === 0, skipped: false, reason: decision.reason };
-}
-
-/**
- * Remove an orphaned source. Called only after new-source sync verifies pages
- * exist, so the old source is provably redundant before deletion. Routed through
- * safeSourcesRemove for the #1734 guards.
- */
-export function removeOrphanedSource(oldId: string, env?: NodeJS.ProcessEnv): boolean {
-  return safeSourcesRemove(oldId, env).removed;
+  return { kind: "manual-disposition-required", oldId: legacyPathHashId, oldPath, newId: newSourceId };
 }
 
 /**
@@ -620,6 +527,12 @@ function validateCalleeCapabilities(env: NodeJS.ProcessEnv): void {
   if (!gate.ok) throw new Error(gate.reason);
 }
 
+function assertNoSourceCollision(sourceId: string, root: string, env: NodeJS.ProcessEnv): void {
+  const repo = realRepoIdentity(root, env);
+  const disposition = sourceCollisionDisposition(sourceId, repo, env);
+  if (!disposition.ok) throw new Error(disposition.reason);
+}
+
 async function explicitEnrollSource(
   sourceId: string,
   root: string,
@@ -630,6 +543,7 @@ async function explicitEnrollSource(
   writeSetupState(ctx.paths.setupPath, op);
   try {
     validateCalleeCapabilities(gbrainEnv);
+    assertNoSourceCollision(sourceId, root, gbrainEnv);
     writeSetupState(ctx.paths.setupPath, { ...op, state: "source_registering" });
     const result = await ensureSourceRegistered(sourceId, ctx.repo.canonical_root, {
       federated: true,
@@ -659,6 +573,7 @@ function validateExistingEnrollment(sourceId: string, root: string, gbrainEnv: N
   const ctx = enrollmentContext(root, GSTACK_HOME, gbrainEnv);
   ensureNoInterruptedSetup(ctx.paths.setupPath);
   validateCalleeCapabilities(gbrainEnv);
+  assertNoSourceCollision(sourceId, root, gbrainEnv);
   const record = readEnrollment(ctx.paths.enrollmentPath);
   if (!record) {
     throw new Error(`missing source enrollment for ${ctx.repo.canonical_root}; run /sync-gbrain --enroll --code-only before syncing`);
@@ -773,32 +688,24 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   }
 
   const legacyId = deriveLegacyCodeSourceId(root);
-  let legacyRemoved = false;
-  if (legacyId !== sourceId) {
-    // #1734: route through the data-loss guards (autopilot + source-safety).
-    const rm = safeSourcesRemove(legacyId, gbrainEnv);
-    if (rm.skipped && !args.quiet) {
-      console.error(`[sync:code] legacy-source cleanup skipped: ${rm.reason}`);
-    }
-    if (rm.removed) legacyRemoved = true;
-  }
-
-  // Step 0b: Hostname-fold migration (#1414).
-  // Before #1468 the source id hashed only the absolute repo path. After the
-  // hostname fold, every existing user has a legacy id that no longer matches
-  // what deriveCodeSourceId produces. Try rename-in-place first (preserves
-  // pages); fall back to register-new → sync-OK → remove-old. Path-drift
-  // (user moved the repo, etc.) skips migration with a warning.
   const pathOnlyHashLegacyId = derivePathOnlyHashLegacyId(root);
   const migration = planHostnameFoldMigration(root, sourceId, pathOnlyHashLegacyId, gbrainEnv);
+  if (migration.kind === "manual-disposition-required") {
+    return {
+      name: "code", ran: true, ok: false, duration_ms: Date.now() - t0,
+      summary: `refused: legacy source ${migration.oldId} requires explicit collision migration/disposition before sync`,
+      detail: { source_id: sourceId, source_path: root, status: "failed" },
+    };
+  }
+  if (legacyId !== sourceId && !args.quiet) {
+    console.error(`[sync:code] ordinary sync will not remove, recreate, or repair legacy source ${legacyId}`);
+  }
   if (migration.kind === "skipped-path-drift" && !args.quiet) {
     console.error(
-      `[sync:code] hostname-fold migration skipped: legacy source ${migration.oldId} `
+      `[sync:code] hostname-fold disposition skipped: legacy source ${migration.oldId} `
       + `points at ${migration.oldPath}, current repo is ${migration.currentPath}. `
-      + `Clean up manually with: gbrain sources remove ${migration.oldId} --confirm-destructive`,
+      + `Run explicit source-collision migration/disposition before syncing that source.`,
     );
-  } else if (migration.kind === "renamed" && !args.quiet) {
-    console.error(`[sync:code] hostname-fold migration: renamed ${migration.oldId} → ${migration.newId} (pages preserved)`);
   }
 
   // Step 2: Always run the page-creating file walk first, then (for --full)
@@ -881,26 +788,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "synced" });
   const pageCount = sourcePageCount(sourceId, gbrainEnv);
 
-  // Step 4: Deferred hostname-fold cleanup.
-  // Only remove the pre-#1468 path-only-hash source NOW that the new source
-  // has registered + synced + has pages. Removing before sync would create a
-  // data-loss window if sync failed; removing without a page-count check would
-  // wipe pages when sync silently no-op'd. This is the codex-review-flagged
-  // safety: register → sync → verify → THEN delete.
-  let hostnameLegacyRemoved = false;
-  if (migration.kind === "pending-cleanup" && pageCount !== null && pageCount > 0) {
-    hostnameLegacyRemoved = removeOrphanedSource(migration.oldId, gbrainEnv);
-    if (hostnameLegacyRemoved && !args.quiet) {
-      console.error(`[sync:code] hostname-fold migration: removed legacy ${migration.oldId} after new source sync verified (page_count=${pageCount})`);
-    }
-  }
-
-  const legacyParts: string[] = [];
-  if (legacyRemoved) legacyParts.push(`removed legacy ${legacyId}`);
-  if (migration.kind === "renamed") legacyParts.push(`renamed ${migration.oldId}→${migration.newId}`);
-  if (hostnameLegacyRemoved) legacyParts.push(`removed pre-hostname-fold ${migration.kind === "pending-cleanup" ? migration.oldId : ""}`);
-  const legacyNote = legacyParts.length > 0 ? `, ${legacyParts.join(", ")}` : "";
-  const baseSummary = `${registered ? "registered + " : ""}synced ${sourceId} (page_count=${pageCount ?? "unknown"}${legacyNote})`;
+  const baseSummary = `${registered ? "registered + " : ""}synced ${sourceId} (page_count=${pageCount ?? "unknown"})`;
   writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "complete" });
 
   return {
