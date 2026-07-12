@@ -32,7 +32,7 @@
 import { existsSync, statSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync } from "fs";
 import { join, dirname } from "path";
 import { execSync, spawnSync } from "child_process";
-import { homedir, hostname } from "os";
+import { homedir } from "os";
 import { createHash } from "crypto";
 
 import "../lib/conductor-env-shim";
@@ -43,16 +43,21 @@ import { localEngineStatus, type LocalEngineStatus } from "../lib/gbrain-local-s
 import { buildGbrainEnv, spawnGbrain, execGbrainJson, NEEDS_SHELL_ON_WINDOWS } from "../lib/gbrain-exec";
 import {
   buildEnrollmentRecord,
+  acquireEnrollmentLock,
   capabilityGate,
   deriveCollisionResistantSourceId,
   enrollmentContext,
   ensureNoInterruptedSetup,
   fetchSourceRow,
+  inspectEnrollment,
   newSetupOperation,
   readEnrollment,
   realRepoIdentity,
+  resumeEnrollment,
+  rollbackEnrollment,
   sourceCollisionDisposition,
   sourceGeneration,
+  transitionSetupState,
   validateEnrollment,
   writeEnrollment,
   writeSetupState,
@@ -62,6 +67,7 @@ import {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Mode = "incremental" | "full" | "dry-run";
+type EnrollmentCommand = "inspect" | "resume" | "rollback" | null;
 
 interface CliArgs {
   mode: Mode;
@@ -74,6 +80,7 @@ interface CliArgs {
   allowReclone: boolean;
   /** Explicitly create or refresh the external source enrollment record. */
   enroll: boolean;
+  enrollmentCommand: EnrollmentCommand;
 }
 
 interface CodeStageDetail {
@@ -231,6 +238,10 @@ Options:
                        even though gbrain may auto-reclone the working tree (#1734).
   --enroll             Explicitly create or refresh this repo's external GBrain source
                        enrollment before sync. Required once per repo and brain.
+  --enroll-inspect     Inspect current enrollment and interrupted setup state.
+  --enroll-resume      Resume an interrupted enrollment setup operation.
+  --enroll-rollback    Roll back an interrupted setup. Compensates only sources
+                       created by the interrupted operation.
   --help               This text.
 
 Stages run in order: code → memory ingest → curated git push.
@@ -248,6 +259,7 @@ function parseArgs(): CliArgs {
   let codeOnly = false;
   let allowReclone = false;
   let enroll = false;
+  let enrollmentCommand: EnrollmentCommand = null;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -261,6 +273,9 @@ function parseArgs(): CliArgs {
       case "--no-brain-sync": noBrainSync = true; break;
       case "--allow-reclone": allowReclone = true; break;
       case "--enroll": enroll = true; break;
+      case "--enroll-inspect": enrollmentCommand = "inspect"; break;
+      case "--enroll-resume": enrollmentCommand = "resume"; break;
+      case "--enroll-rollback": enrollmentCommand = "rollback"; break;
       case "--code-only":
         codeOnly = true;
         noMemory = true;
@@ -277,7 +292,7 @@ function parseArgs(): CliArgs {
     }
   }
 
-  return { mode, quiet, noCode, noMemory, noBrainSync, codeOnly, allowReclone, enroll };
+  return { mode, quiet, noCode, noMemory, noBrainSync, codeOnly, allowReclone, enroll, enrollmentCommand };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -303,17 +318,12 @@ function originUrl(): string | null {
 /**
  * Derive a host- and worktree-aware source id for the cwd code corpus.
  *
- * Pattern: `gstack-code-<slug>-<hostpathhash8>` where slug comes from origin
- * (org/repo) and hostpathhash8 is the first 8 hex chars of
- * sha1(`${hostname}::${absolute repo path}`). Folding hostname into the hash
- * keeps Conductor worktrees of the same repo as distinct sources on one host
- * AND keeps two machines that share an absolute layout (e.g. chezmoi-managed
- * home dirs against a federated brain) from colliding on each other.
+ * Pattern: `gstack-code-<slug>-<repohash14>` where slug comes from origin
+ * (org/repo) and repohash14 is derived from canonical remote, git common dir,
+ * and canonical root. Hostname is caller-controlled display metadata only and
+ * is not trusted identity input.
  *
  * Falls back to the repo basename when there is no origin (local repo).
- *
- * `GSTACK_HOSTNAME` env override is honored for deterministic tests; in
- * production paths it is unset and `os.hostname()` is used.
  *
  * gbrain enforces source ids to be 1-32 lowercase alnum chars with
  * optional interior hyphens. `constrainSourceId` handles the 32-char cap
@@ -533,18 +543,50 @@ function assertNoSourceCollision(sourceId: string, root: string, env: NodeJS.Pro
   if (!disposition.ok) throw new Error(disposition.reason);
 }
 
+function assertCompletionProof(sourceId: string, pageCount: number | null, setupOp: SetupOperation): void {
+  const validEmptyProof = pageCount === 0 ? "source exists but code walk reported zero pages" : undefined;
+  if (pageCount === null && !validEmptyProof) throw new Error("cannot mark setup complete without verified page_count or valid-empty proof");
+  if (setupOp.failed_files && setupOp.failed_files > 0) throw new Error(`cannot mark setup complete with ${setupOp.failed_files} failed files`);
+}
+
+async function runEnrollmentCommand(command: Exclude<EnrollmentCommand, null>, root: string, env: NodeJS.ProcessEnv): Promise<void> {
+  if (command === "inspect") {
+    const status = inspectEnrollment(root, GSTACK_HOME, env);
+    console.log(JSON.stringify(status, null, 2));
+    return;
+  }
+  if (command === "resume") {
+    const op = await resumeEnrollment(root, GSTACK_HOME, env);
+    console.log(JSON.stringify(op, null, 2));
+    return;
+  }
+  const op = await rollbackEnrollment(root, GSTACK_HOME, env);
+  console.log(JSON.stringify(op, null, 2));
+}
+
 async function explicitEnrollSource(
   sourceId: string,
   root: string,
   gbrainEnv: NodeJS.ProcessEnv,
 ): Promise<{ op: SetupOperation; registered: boolean }> {
   const ctx = enrollmentContext(root, GSTACK_HOME, gbrainEnv);
+  ensureNoInterruptedSetup(ctx.paths.setupPath);
+  const release = acquireEnrollmentLock(ctx.paths.lockPath);
+  const prior = readEnrollment(ctx.paths.enrollmentPath) || undefined;
+  const beforeRow = fetchSourceRow(sourceId, gbrainEnv);
   const op = newSetupOperation(ctx.enrollmentId, sourceId, ctx.repo.canonical_root);
-  writeSetupState(ctx.paths.setupPath, op);
   try {
     validateCalleeCapabilities(gbrainEnv);
     assertNoSourceCollision(sourceId, root, gbrainEnv);
-    writeSetupState(ctx.paths.setupPath, { ...op, state: "source_registering" });
+    writeSetupState(ctx.paths.setupPath, {
+      ...op,
+      state: "validated",
+      source_preexisted: Boolean(beforeRow),
+      source_created: false,
+      source_generation_before: sourceGeneration(beforeRow),
+      anchor_before: ctx.repo.head_commit,
+    });
+    transitionSetupState(ctx.paths.setupPath, op, "source_registering");
     const result = await ensureSourceRegistered(sourceId, ctx.repo.canonical_root, {
       federated: true,
       reregister_on_drift: false,
@@ -553,19 +595,21 @@ async function explicitEnrollSource(
     if (result.state.status === "drift") {
       throw new Error(`registered source root drift: ${result.state.registered_path} != ${ctx.repo.canonical_root}`);
     }
-    writeSetupState(ctx.paths.setupPath, { ...op, state: "source_registered" });
+    transitionSetupState(ctx.paths.setupPath, op, "source_registered", { source_created: !beforeRow && result.changed });
     const row = fetchSourceRow(sourceId, gbrainEnv);
     if (!row) throw new Error("source registration was not visible after add");
     const record = buildEnrollmentRecord(ctx.repo, ctx.brain, {
       source_id: sourceId,
       source_generation: sourceGeneration(row),
-    }, readEnrollment(ctx.paths.enrollmentPath) || undefined);
+    }, prior, ctx.paths.enrollmentPath);
     validateEnrollment(record, ctx.repo, ctx.brain, row);
     writeEnrollment(ctx.paths.enrollmentPath, record);
     return { op, registered: result.changed };
   } catch (err) {
-    writeSetupState(ctx.paths.setupPath, { ...op, state: "failed", error: (err as Error).message });
+    transitionSetupState(ctx.paths.setupPath, op, "failed", { error: (err as Error).message });
     throw err;
+  } finally {
+    release();
   }
 }
 
@@ -584,7 +628,7 @@ function validateExistingEnrollment(sourceId: string, root: string, gbrainEnv: N
   const row = fetchSourceRow(sourceId, gbrainEnv);
   validateEnrollment(record, ctx.repo, ctx.brain, row);
   const op = newSetupOperation(ctx.enrollmentId, sourceId, ctx.repo.canonical_root);
-  writeSetupState(ctx.paths.setupPath, op);
+  writeSetupState(ctx.paths.setupPath, { ...op, source_preexisted: true, source_created: false, source_generation_before: record.source.source_generation, anchor_before: ctx.repo.head_commit });
   return op;
 }
 
@@ -746,7 +790,8 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     };
   }
 
-  writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "syncing" });
+  const setupPath = enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath;
+  transitionSetupState(setupPath, setupOp, "syncing");
   const walkResult = spawnGbrain(["sync", "--strategy", "code", "--source", sourceId], {
     stdio: args.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "inherit", "inherit"],
     timeout: codeTimeoutMs,
@@ -754,7 +799,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   });
 
   if (walkResult.status !== 0) {
-    writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "failed", error: `gbrain sync exited ${walkResult.status}` });
+    transitionSetupState(setupPath, setupOp, "failed", { error: `gbrain sync exited ${walkResult.status}` });
     return {
       name: "code",
       ran: true,
@@ -773,7 +818,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     });
 
     if (reindexResult.status !== 0) {
-      writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "failed", error: `gbrain reindex-code exited ${reindexResult.status}` });
+      transitionSetupState(setupPath, setupOp, "failed", { error: `gbrain reindex-code exited ${reindexResult.status}` });
       return {
         name: "code",
         ran: true,
@@ -785,11 +830,27 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     }
   }
 
-  writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "synced" });
+  transitionSetupState(setupPath, setupOp, "synced");
   const pageCount = sourcePageCount(sourceId, gbrainEnv);
+  assertCompletionProof(sourceId, pageCount, setupOp);
+  const refreshed = fetchSourceRow(sourceId, gbrainEnv);
+  if (!refreshed) throw new Error("source disappeared before completion");
+  const ctxAfterSync = enrollmentContext(root, GSTACK_HOME, gbrainEnv);
+  const currentRecord = readEnrollment(ctxAfterSync.paths.enrollmentPath) || undefined;
+  const refreshedRecord = buildEnrollmentRecord(ctxAfterSync.repo, ctxAfterSync.brain, {
+    source_id: sourceId,
+    source_generation: sourceGeneration(refreshed),
+  }, currentRecord, ctxAfterSync.paths.enrollmentPath);
+  writeEnrollment(ctxAfterSync.paths.enrollmentPath, refreshedRecord);
 
   const baseSummary = `${registered ? "registered + " : ""}synced ${sourceId} (page_count=${pageCount ?? "unknown"})`;
-  writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "complete" });
+  transitionSetupState(setupPath, setupOp, "complete", {
+    source_generation_after: sourceGeneration(refreshed),
+    anchor_after: ctxAfterSync.repo.head_commit,
+    page_count: pageCount,
+    failed_files: 0,
+    valid_empty_proof: pageCount === 0 ? "source exists and sync completed with zero pages" : undefined,
+  });
 
   return {
     name: "code",
@@ -1006,6 +1067,14 @@ function formatStage(s: StageResult): string {
 
 async function main(): Promise<void> {
   const args = parseArgs();
+
+  if (args.enrollmentCommand) {
+    const root = repoRoot();
+    if (!root) throw new Error("enrollment commands must run inside a git repo");
+    const env = buildGbrainEnv({ announce: false });
+    await runEnrollmentCommand(args.enrollmentCommand, root, env);
+    process.exit(0);
+  }
 
   if (!args.quiet) {
     const engine = detectEngineTier();

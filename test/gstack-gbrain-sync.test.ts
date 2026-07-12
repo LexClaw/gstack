@@ -228,13 +228,10 @@ describe("gstack-gbrain-sync CLI", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("derives distinct source ids for the same absolute path on different hosts", () => {
-    // Issue #1414: two machines with identical home-dir layouts (chezmoi-managed
-    // dotfiles, ansible-provisioned VMs) collide on the same source id when
-    // federated against a shared gbrain DB, because the pre-fix `pathHash` was
-    // sha1(absolute path) only — host-agnostic. Folding hostname into the hash
-    // key keeps them distinct. `GSTACK_HOSTNAME` env var is the test-only knob;
-    // production uses `os.hostname()`.
+  it("does not trust GSTACK_HOSTNAME when deriving source ids", () => {
+    // Third-pass caller correction: hostname is mutable caller input. It can be
+    // display metadata, but it must not change trusted repository identity or
+    // the target source id.
     const home = makeTestHome();
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
@@ -267,8 +264,8 @@ describe("gstack-gbrain-sync CLI", () => {
     const idB = (b.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/)?.[1];
     expect(idA).toBeTruthy();
     expect(idB).toBeTruthy();
-    expect(idA).not.toBe(idB);
-    // Both still gbrain-valid.
+    expect(idA).toBe(idB);
+    // The trusted id is still gbrain-valid.
     const VALID_ID = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
     expect(idA!).toMatch(VALID_ID);
     expect(idB!).toMatch(VALID_ID);
