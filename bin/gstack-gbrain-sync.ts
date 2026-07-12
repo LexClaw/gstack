@@ -41,6 +41,22 @@ import { ensureSourceRegistered, sourcePageCount, parseSourcesList } from "../li
 import { detectAutopilot, decideSourceRemove, decideCodeSync } from "../lib/gbrain-guards";
 import { localEngineStatus, type LocalEngineStatus } from "../lib/gbrain-local-status";
 import { buildGbrainEnv, spawnGbrain, execGbrainJson, NEEDS_SHELL_ON_WINDOWS } from "../lib/gbrain-exec";
+import {
+  buildEnrollmentRecord,
+  capabilityGate,
+  deriveCollisionResistantSourceId,
+  enrollmentContext,
+  ensureNoInterruptedSetup,
+  fetchSourceRow,
+  newSetupOperation,
+  readEnrollment,
+  realRepoIdentity,
+  sourceGeneration,
+  validateEnrollment,
+  writeEnrollment,
+  writeSetupState,
+  type SetupOperation,
+} from "../lib/gbrain-enrollment";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -55,6 +71,8 @@ interface CliArgs {
   codeOnly: boolean;
   /** #1734: opt-in to sync a URL-managed source whose code walk may auto-reclone. */
   allowReclone: boolean;
+  /** Explicitly create or refresh the external source enrollment record. */
+  enroll: boolean;
 }
 
 interface CodeStageDetail {
@@ -210,6 +228,8 @@ Options:
   --code-only          Only run the code-import stage (alias for --no-memory --no-brain-sync).
   --allow-reclone      Permit the code walk for URL-managed sources (remote_url set)
                        even though gbrain may auto-reclone the working tree (#1734).
+  --enroll             Explicitly create or refresh this repo's external GBrain source
+                       enrollment before sync. Required once per repo and brain.
   --help               This text.
 
 Stages run in order: code → memory ingest → curated git push.
@@ -226,6 +246,7 @@ function parseArgs(): CliArgs {
   let noBrainSync = false;
   let codeOnly = false;
   let allowReclone = false;
+  let enroll = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -238,6 +259,7 @@ function parseArgs(): CliArgs {
       case "--no-memory": noMemory = true; break;
       case "--no-brain-sync": noBrainSync = true; break;
       case "--allow-reclone": allowReclone = true; break;
+      case "--enroll": enroll = true; break;
       case "--code-only":
         codeOnly = true;
         noMemory = true;
@@ -254,7 +276,7 @@ function parseArgs(): CliArgs {
     }
   }
 
-  return { mode, quiet, noCode, noMemory, noBrainSync, codeOnly, allowReclone };
+  return { mode, quiet, noCode, noMemory, noBrainSync, codeOnly, allowReclone, enroll };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -297,23 +319,7 @@ function originUrl(): string | null {
  * with a hashed-tail fallback when the combined slug exceeds budget.
  */
 function deriveCodeSourceId(repoPath: string): string {
-  const host = process.env.GSTACK_HOSTNAME || hostname();
-  const hostPathHash = createHash("sha1").update(`${host}::${repoPath}`).digest("hex").slice(0, 8);
-  const remote = canonicalizeRemote(originUrl());
-  if (remote) {
-    const segs = remote.split("/").filter(Boolean);
-    const slugSource = segs.slice(-2).join("-");
-    const fullId = constrainSourceId("gstack-code", `${slugSource}-${hostPathHash}`);
-    // If the org+repo+hostpathhash fits cleanly (suffix preserved), use it.
-    if (fullId.endsWith(`-${hostPathHash}`)) return fullId;
-    // Otherwise drop the org prefix and retry with just repo+hostpathhash so
-    // the repo name stays readable. If that still doesn't fit,
-    // constrainSourceId falls back to a deterministic hash-only form.
-    const repoOnly = segs[segs.length - 1] || "repo";
-    return constrainSourceId("gstack-code", `${repoOnly}-${hostPathHash}`);
-  }
-  const base = repoPath.split("/").pop() || "repo";
-  return constrainSourceId("gstack-code", `${base}-${hostPathHash}`);
+  return deriveCollisionResistantSourceId(realRepoIdentity(repoPath));
 }
 
 /**
@@ -609,6 +615,64 @@ function releaseLock(): void {
   }
 }
 
+function validateCalleeCapabilities(env: NodeJS.ProcessEnv): void {
+  const gate = capabilityGate(env);
+  if (!gate.ok) throw new Error(gate.reason);
+}
+
+async function explicitEnrollSource(
+  sourceId: string,
+  root: string,
+  gbrainEnv: NodeJS.ProcessEnv,
+): Promise<{ op: SetupOperation; registered: boolean }> {
+  const ctx = enrollmentContext(root, GSTACK_HOME, gbrainEnv);
+  const op = newSetupOperation(ctx.enrollmentId, sourceId, ctx.repo.canonical_root);
+  writeSetupState(ctx.paths.setupPath, op);
+  try {
+    validateCalleeCapabilities(gbrainEnv);
+    writeSetupState(ctx.paths.setupPath, { ...op, state: "source_registering" });
+    const result = await ensureSourceRegistered(sourceId, ctx.repo.canonical_root, {
+      federated: true,
+      reregister_on_drift: false,
+      env: gbrainEnv,
+    });
+    if (result.state.status === "drift") {
+      throw new Error(`registered source root drift: ${result.state.registered_path} != ${ctx.repo.canonical_root}`);
+    }
+    writeSetupState(ctx.paths.setupPath, { ...op, state: "source_registered" });
+    const row = fetchSourceRow(sourceId, gbrainEnv);
+    if (!row) throw new Error("source registration was not visible after add");
+    const record = buildEnrollmentRecord(ctx.repo, ctx.brain, {
+      source_id: sourceId,
+      source_generation: sourceGeneration(row),
+    }, readEnrollment(ctx.paths.enrollmentPath) || undefined);
+    validateEnrollment(record, ctx.repo, ctx.brain, row);
+    writeEnrollment(ctx.paths.enrollmentPath, record);
+    return { op, registered: result.changed };
+  } catch (err) {
+    writeSetupState(ctx.paths.setupPath, { ...op, state: "failed", error: (err as Error).message });
+    throw err;
+  }
+}
+
+function validateExistingEnrollment(sourceId: string, root: string, gbrainEnv: NodeJS.ProcessEnv): SetupOperation {
+  const ctx = enrollmentContext(root, GSTACK_HOME, gbrainEnv);
+  ensureNoInterruptedSetup(ctx.paths.setupPath);
+  validateCalleeCapabilities(gbrainEnv);
+  const record = readEnrollment(ctx.paths.enrollmentPath);
+  if (!record) {
+    throw new Error(`missing source enrollment for ${ctx.repo.canonical_root}; run /sync-gbrain --enroll --code-only before syncing`);
+  }
+  if (record.source.source_id !== sourceId) {
+    throw new Error(`source enrollment collision: record has ${record.source.source_id}, expected ${sourceId}`);
+  }
+  const row = fetchSourceRow(sourceId, gbrainEnv);
+  validateEnrollment(record, ctx.repo, ctx.brain, row);
+  const op = newSetupOperation(ctx.enrollmentId, sourceId, ctx.repo.canonical_root);
+  writeSetupState(ctx.paths.setupPath, op);
+  return op;
+}
+
 // ── Stage runners ──────────────────────────────────────────────────────────
 
 /**
@@ -665,7 +729,9 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
       ran: false,
       ok: true,
       duration_ms: 0,
-      summary: `would: gbrain sources add ${sourceId} --path ${root} --federated; gbrain sync --strategy code --source ${sourceId}; gbrain sources attach ${sourceId}`,
+      summary: args.enroll
+        ? `would: validate gbrain capabilities; gbrain sources add ${sourceId} --path ${root} --federated; write external enrollment; gbrain sync --strategy code --source ${sourceId}`
+        : `would: validate external enrollment; gbrain sync --strategy code --source ${sourceId}`,
       detail: { source_id: sourceId, source_path: root, status: "skipped" },
     };
   }
@@ -681,17 +747,31 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     return skipStageForLocalStatus("code", localStatus, t0);
   }
 
-  // Step 0a: Best-effort cleanup of pre-pathhash legacy source (v1.x form).
-  // Earlier /sync-gbrain versions registered `gstack-code-<slug>` (no path
-  // suffix). On a multi-worktree repo, those collapsed onto a single id
-  // with last-sync-wins. Federated search would return stale duplicate
-  // hits forever if we left the orphan in place. Remove the legacy id once
-  // here so users don't accumulate orphans.
-  // Failure is non-fatal — we still register the new id below.
   // gbrainEnv seeds DATABASE_URL from gbrain's config so this stage works
-  // inside Next.js / Prisma / Rails projects with their own .env.local
-  // (codex review #7 — bug fix is wider than #1508 as filed).
+  // inside projects with their own .env.local. Enrollment validation happens
+  // before legacy cleanup, source registration, sync, attach, or state writes.
   const gbrainEnv = buildGbrainEnv({ announce: !args.quiet });
+  let registered = false;
+  let setupOp: SetupOperation;
+  try {
+    if (args.enroll) {
+      const enrollment = await explicitEnrollSource(sourceId, root, gbrainEnv);
+      registered = enrollment.registered;
+      setupOp = enrollment.op;
+    } else {
+      setupOp = validateExistingEnrollment(sourceId, root, gbrainEnv);
+    }
+  } catch (err) {
+    return {
+      name: "code",
+      ran: true,
+      ok: false,
+      duration_ms: Date.now() - t0,
+      summary: `source enrollment failed: ${(err as Error).message}`,
+      detail: { source_id: sourceId, source_path: root, status: "failed" },
+    };
+  }
+
   const legacyId = deriveLegacyCodeSourceId(root);
   let legacyRemoved = false;
   if (legacyId !== sourceId) {
@@ -719,23 +799,6 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     );
   } else if (migration.kind === "renamed" && !args.quiet) {
     console.error(`[sync:code] hostname-fold migration: renamed ${migration.oldId} → ${migration.newId} (pages preserved)`);
-  }
-
-  // Step 1: Ensure source registered (idempotent). Single source of truth in lib —
-  // no synchronous duplicate here (per /codex review #12).
-  let registered = false;
-  try {
-    const result = await ensureSourceRegistered(sourceId, root, { federated: true, env: gbrainEnv });
-    registered = result.changed;
-  } catch (err) {
-    return {
-      name: "code",
-      ran: true,
-      ok: false,
-      duration_ms: Date.now() - t0,
-      summary: `source registration failed: ${(err as Error).message}`,
-      detail: { source_id: sourceId, source_path: root, status: "failed" },
-    };
   }
 
   // Step 2: Always run the page-creating file walk first, then (for --full)
@@ -776,6 +839,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     };
   }
 
+  writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "syncing" });
   const walkResult = spawnGbrain(["sync", "--strategy", "code", "--source", sourceId], {
     stdio: args.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "inherit", "inherit"],
     timeout: codeTimeoutMs,
@@ -783,6 +847,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   });
 
   if (walkResult.status !== 0) {
+    writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "failed", error: `gbrain sync exited ${walkResult.status}` });
     return {
       name: "code",
       ran: true,
@@ -801,6 +866,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     });
 
     if (reindexResult.status !== 0) {
+      writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "failed", error: `gbrain reindex-code exited ${reindexResult.status}` });
       return {
         name: "code",
         ran: true,
@@ -812,20 +878,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
     }
   }
 
-  // Step 3: Pin this worktree's CWD to the source via .gbrain-source. Subsequent
-  // gbrain code-def / code-refs / code-callers calls from anywhere under <root>
-  // route to this source by default — no --source flag needed.
-  //
-  // If attach fails the whole flow has a silent correctness problem: sync
-  // succeeded but unqualified `gbrain code-def` from this worktree will hit
-  // the wrong/default source. Treat it as a stage failure (ok=false) so the
-  // verdict block surfaces ERR and the user knows to retry rather than
-  // trusting stale results.
-  const attach = spawnGbrain(["sources", "attach", sourceId], {
-    timeout: 10_000,
-    cwd: root,
-    baseEnv: gbrainEnv,
-  });
+  writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "synced" });
   const pageCount = sourcePageCount(sourceId, gbrainEnv);
 
   // Step 4: Deferred hostname-fold cleanup.
@@ -848,31 +901,7 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
   if (hostnameLegacyRemoved) legacyParts.push(`removed pre-hostname-fold ${migration.kind === "pending-cleanup" ? migration.oldId : ""}`);
   const legacyNote = legacyParts.length > 0 ? `, ${legacyParts.join(", ")}` : "";
   const baseSummary = `${registered ? "registered + " : ""}synced ${sourceId} (page_count=${pageCount ?? "unknown"}${legacyNote})`;
-
-  if (attach.status !== 0) {
-    const reason = (attach.stderr || attach.stdout || "").trim().split("\n").pop() || `exit ${attach.status}`;
-    return {
-      name: "code",
-      ran: true,
-      ok: false,
-      duration_ms: Date.now() - t0,
-      summary: `${baseSummary}; attach FAILED (${reason}) — code-def queries from this worktree will hit the default source until /sync-gbrain succeeds`,
-      detail: {
-        source_id: sourceId,
-        source_path: root,
-        page_count: pageCount,
-        last_imported: new Date().toISOString(),
-        status: "failed",
-      },
-    };
-  }
-
-  // v1.29.0.0 changelog promised the per-worktree pin would be ignored in the
-  // consuming repo, but the change actually only added .gbrain-source to
-  // gstack's own .gitignore. Without the consumer-side entry, the pin gets
-  // committed and breaks the per-worktree promise: Conductor sibling worktrees
-  // step on each other's pin every time anyone commits (#1384).
-  ensureGbrainSourceGitignored(root);
+  writeSetupState(enrollmentContext(root, GSTACK_HOME, gbrainEnv).paths.setupPath, { ...setupOp, state: "complete" });
 
   return {
     name: "code",

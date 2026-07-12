@@ -71,7 +71,7 @@ describe("gstack-gbrain-sync CLI", () => {
     expect(r.exitCode).toBe(0);
     // Code stage now uses native code surface: sources add + sync --strategy code
     // (NOT gbrain import — that's the markdown-only path that was rejected post-codex).
-    expect(r.stdout).toContain("would: gbrain sources add");
+    expect(r.stdout).toContain("would: validate external enrollment");
     expect(r.stdout).toContain("gbrain sync --strategy code");
     expect(r.stdout).not.toContain("gbrain import");
     // memory + brain-sync stages should not appear
@@ -87,7 +87,7 @@ describe("gstack-gbrain-sync CLI", () => {
 
     const r = runScript(["--dry-run"], { HOME: home, GSTACK_HOME: gstackHome });
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("would: gbrain sources add");
+    expect(r.stdout).toContain("would: validate external enrollment");
     expect(r.stdout).toContain("gbrain sync --strategy code");
     expect(r.stdout).toContain("would: gstack-memory-ingest");
     expect(r.stdout).toContain("would: gstack-brain-sync");
@@ -117,7 +117,7 @@ describe("gstack-gbrain-sync CLI", () => {
 
     const r = runScript(["--dry-run", "--code-only", "--quiet"], { HOME: home, GSTACK_HOME: gstackHome });
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toMatch(/gbrain sources add gstack-code-[a-z0-9-]+/);
+    expect(r.stdout).toMatch(/--source gstack-code-[a-z0-9-]+/);
     expect(r.stdout).toMatch(/gbrain sync --strategy code --source gstack-code-[a-z0-9-]+/);
     rmSync(home, { recursive: true, force: true });
   });
@@ -151,7 +151,7 @@ describe("gstack-gbrain-sync CLI", () => {
         env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
       });
       expect(r.status).toBe(0);
-      const m = (r.stdout || "").match(/gbrain sources add (\S+)/);
+      const m = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/);
       expect(m).not.toBeNull();
       const id = m![1];
       expect(id.length).toBeLessThanOrEqual(32);
@@ -181,7 +181,7 @@ describe("gstack-gbrain-sync CLI", () => {
       env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
     });
     expect(r.status).toBe(0);
-    const m = (r.stdout || "").match(/gbrain sources add (\S+)/);
+    const m = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/);
     expect(m).not.toBeNull();
     const id = m![1];
     expect(id.startsWith("gstack-code-")).toBe(true);
@@ -216,7 +216,7 @@ describe("gstack-gbrain-sync CLI", () => {
       env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
     });
     expect(r.status).toBe(0);
-    const m = (r.stdout || "").match(/gbrain sources add (\S+)/);
+    const m = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/);
     expect(m).not.toBeNull();
     const id = m![1];
     // gbrain validator: 1-32 lowercase alnum + interior hyphens, no leading
@@ -264,8 +264,8 @@ describe("gstack-gbrain-sync CLI", () => {
     const b = runAs("machine-b");
     expect(a.status).toBe(0);
     expect(b.status).toBe(0);
-    const idA = (a.stdout || "").match(/gbrain sources add (\S+)/)?.[1];
-    const idB = (b.stdout || "").match(/gbrain sources add (\S+)/)?.[1];
+    const idA = (a.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/)?.[1];
+    const idB = (b.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/)?.[1];
     expect(idA).toBeTruthy();
     expect(idB).toBeTruthy();
     expect(idA).not.toBe(idB);
@@ -277,7 +277,7 @@ describe("gstack-gbrain-sync CLI", () => {
     // Same host + same path stays stable across invocations.
     const a2 = runAs("machine-a");
     expect(a2.status).toBe(0);
-    const idA2 = (a2.stdout || "").match(/gbrain sources add (\S+)/)?.[1];
+    const idA2 = (a2.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/)?.[1];
     expect(idA2).toBe(idA);
 
     rmSync(repo, { recursive: true, force: true });
@@ -440,7 +440,7 @@ describe("gstack-gbrain-sync CLI", () => {
         env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
       });
       expect(r.status).toBe(0);
-      const m = (r.stdout || "").match(/gbrain sources add (\S+)/);
+      const m = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/);
       expect(m).not.toBeNull();
       return m![1];
     };
@@ -476,7 +476,7 @@ describe("gstack-gbrain-sync CLI", () => {
         env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
       });
       expect(r.status).toBe(0);
-      const m = (r.stdout || "").match(/gbrain sources add (\S+)/);
+      const m = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/);
       expect(m).not.toBeNull();
       return m![1];
     };
@@ -512,20 +512,16 @@ describe("gstack-gbrain-sync CLI", () => {
     // legacy id being registered (which we can't probe in a sandboxed test
     // without a real gbrain CLI). Instead, assert the preview still includes
     // the new flow (sources add + sync + attach) at minimum.
-    expect(r.stdout).toMatch(/gbrain sources add gstack-code-/);
-    expect(r.stdout).toMatch(/gbrain sync --strategy code --source gstack-code-/);
-    expect(r.stdout).toMatch(/gbrain sources attach gstack-code-/);
+    expect(r.stdout).toMatch(/--source gstack-code-/);
+    expect(r.stdout).toMatch(/validate external enrollment/);
 
     rmSync(repo, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("dry-run preview includes the `sources attach` step (kubectl-style CWD pin)", () => {
-    // Post-spike redesign: after sources add + sync, /sync-gbrain calls
-    // `gbrain sources attach <id>` so subsequent gbrain code-def / code-refs
-    // calls from anywhere under the worktree route to this source by default.
-    // The dry-run preview must surface that step so the user knows what we
-    // would do.
+  it("dry-run preview includes the external enrollment validation step", () => {
+    // Current safety contract does not write a mutable checkout pin. It validates
+    // an enrollment stored outside the repo before any sync side effect.
     const home = makeTestHome();
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
@@ -540,7 +536,7 @@ describe("gstack-gbrain-sync CLI", () => {
       env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
     });
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/gbrain sources attach gstack-code-/);
+    expect(r.stdout).toMatch(/validate external enrollment/);
 
     rmSync(repo, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
@@ -633,7 +629,7 @@ describe("derivePathOnlyHashLegacyId", () => {
         cwd: repo,
         env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome, GSTACK_HOSTNAME: "machine-x", PATH: `${bindir}:${process.env.PATH || ""}` },
       });
-      const newId = (r.stdout || "").match(/gbrain sources add (\S+)/)?.[1];
+      const newId = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/)?.[1];
       expect(newId).toBeTruthy();
       expect(newId).not.toBe(legacy);
       rmSync(home, { recursive: true, force: true });
@@ -761,7 +757,7 @@ describe("constrainSourceId truncation (hyphen-boundary cut)", () => {
       env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
     });
     expect(r.status).toBe(0);
-    const id = (r.stdout || "").match(/gbrain sources add (\S+)/)?.[1];
+    const id = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/)?.[1];
     expect(id).toBeTruthy();
     // The id must not contain the mid-word fragment `kill` (left over from
     // slicing inside `skill`). Tokens that survive truncation must be whole.
@@ -793,7 +789,7 @@ describe("constrainSourceId truncation (hyphen-boundary cut)", () => {
       env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
     });
     expect(r.status).toBe(0);
-    const id = (r.stdout || "").match(/gbrain sources add (\S+)/)?.[1];
+    const id = (r.stdout || "").match(/(?:gbrain sources add|--source) (gstack-code-[a-z0-9-]+)/)?.[1];
     expect(id).toBeTruthy();
     expect(id).not.toContain(".");
     expect(id!).toMatch(/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/);
