@@ -168,6 +168,58 @@ describe("gbrain enrollment authority", () => {
     rmSync(missingDb.bin, { recursive: true, force: true });
   });
 
+  it("accepts canonical and nested-supported capability contracts only", () => {
+    const canonical = makeShim({
+      "--version": { stdout: "gbrain 0.42.0" },
+      "capabilities --json": { stdout: JSON.stringify({
+        capabilities: ["explicit-source", "root-identity", "reconciliation-manifest", "db-roles", "schema-v2"],
+        database: { identity: "pg:canonical-db" },
+      }) },
+    });
+    expect(capabilityGate(canonical.env)).toMatchObject({ ok: true, database_identity: "pg:canonical-db" });
+    rmSync(canonical.bin, { recursive: true, force: true });
+
+    const nestedSupported = makeShim({
+      "--version": { stdout: "gbrain 0.42.0" },
+      "capabilities --json": { stdout: JSON.stringify({
+        sync_safety: {
+          supported: true,
+          required_tokens: ["explicit-source", "root-identity", "reconciliation-manifest", "db-roles", "schema-v2"],
+        },
+        database: { session_identity: "pg:nested-session" },
+      }) },
+    });
+    expect(capabilityGate(nestedSupported.env)).toMatchObject({ ok: true, database_identity: "pg:nested-session" });
+    rmSync(nestedSupported.bin, { recursive: true, force: true });
+
+    const nestedUnsupported = makeShim({
+      "--version": { stdout: "gbrain 0.42.0" },
+      "capabilities --json": { stdout: JSON.stringify({
+        sync_safety: {
+          supported: false,
+          required_tokens: ["explicit-source", "root-identity", "reconciliation-manifest", "db-roles", "schema-v2"],
+        },
+        database: { identity: "pg:unsupported" },
+      }) },
+    });
+    expect(capabilityGate(nestedUnsupported.env).ok).toBe(false);
+    rmSync(nestedUnsupported.bin, { recursive: true, force: true });
+
+    const forgedTypes = makeShim({
+      "--version": { stdout: "gbrain 0.42.0" },
+      "capabilities --json": { stdout: JSON.stringify({
+        capabilities: [{ toString: "explicit-source" }, ["root-identity"], true, 42],
+        sync_safety: {
+          supported: true,
+          required_tokens: ["explicit-source", "root-identity", "reconciliation-manifest", "db-roles", "schema-v2"],
+        },
+        database: { identity: "pg:forged" },
+      }) },
+    });
+    expect(capabilityGate(forgedTypes.env).ok).toBe(false);
+    rmSync(forgedTypes.bin, { recursive: true, force: true });
+  });
+
   it("removes GSTACK_HOSTNAME from trusted repo identity", () => {
     const repo = makeRepo();
     const a = realRepoIdentity(repo, { ...process.env, GSTACK_HOSTNAME: "machine-a" });

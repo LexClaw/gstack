@@ -223,6 +223,21 @@ function databaseIdentityFromCapabilities(payload: Record<string, unknown> | nul
   return null;
 }
 
+function capabilitiesFromPayload(payload: Record<string, unknown> | null): string[] {
+  if (!payload) return [];
+  if (Array.isArray(payload.capabilities)) {
+    return payload.capabilities.filter((c): c is string => typeof c === "string");
+  }
+  const syncSafety = payload.sync_safety;
+  if (syncSafety && typeof syncSafety === "object") {
+    const sync = syncSafety as Record<string, unknown>;
+    if (sync.supported === true && Array.isArray(sync.required_tokens)) {
+      return sync.required_tokens.filter((c): c is string => typeof c === "string");
+    }
+  }
+  return [];
+}
+
 export function realRepoIdentity(root: string, env: NodeJS.ProcessEnv = process.env): RepoIdentity {
   let canonicalRoot: string;
   try {
@@ -420,9 +435,7 @@ export function capabilityGate(env: NodeJS.ProcessEnv = process.env): Capability
     return { ok: false, reason: `gbrain ${version || "unknown"} lacks required sync-safety version ${MIN_GBRAIN_VERSION}`, version };
   }
   const capsRaw = capabilitiesPayload(env);
-  const caps = Array.isArray((capsRaw as { capabilities?: unknown[] } | null)?.capabilities)
-    ? ((capsRaw as { capabilities: unknown[] }).capabilities.filter((c): c is string => typeof c === "string"))
-    : [];
+  const caps = capabilitiesFromPayload(capsRaw);
   const missing = REQUIRED_CAPABILITIES.filter((c) => !caps.includes(c));
   const databaseIdentity = databaseIdentityFromCapabilities(capsRaw);
   if (!databaseIdentity) missing.push("connected-database-identity");
